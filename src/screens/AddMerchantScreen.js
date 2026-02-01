@@ -26,6 +26,25 @@ const COLORS = {
   }
 };
 
+// ✅ FIX: Moved OUTSIDE the main component so it doesn't remount on typing
+const InputField = ({ icon, placeholder, value, onChange, secure = false, type = 'default' }) => (
+  <View style={styles.inputContainer}>
+    <View style={styles.inputIcon}>
+      <Ionicons name={icon} size={20} color={COLORS.gray} />
+    </View>
+    <TextInput 
+      style={styles.input} 
+      placeholder={placeholder}
+      placeholderTextColor={COLORS.gray}
+      value={value} 
+      onChangeText={onChange} 
+      secureTextEntry={secure}
+      autoCapitalize="none"
+      keyboardType={type}
+    />
+  </View>
+);
+
 export default function AddMerchantScreen({ managerId, onBack }) {
   const [firstName, setFirst] = useState('');
   const [lastName, setLast] = useState('');
@@ -55,25 +74,6 @@ export default function AddMerchantScreen({ managerId, onBack }) {
       onBack(); 
     }
   };
-
-  // Helper Component for Inputs with Icons
-  const InputField = ({ icon, placeholder, value, onChange, secure = false, type = 'default' }) => (
-    <View style={styles.inputContainer}>
-      <View style={styles.inputIcon}>
-        <Ionicons name={icon} size={20} color={COLORS.gray} />
-      </View>
-      <TextInput 
-        style={styles.input} 
-        placeholder={placeholder}
-        placeholderTextColor={COLORS.gray}
-        value={value} 
-        onChangeText={onChange} 
-        secureTextEntry={secure}
-        autoCapitalize="none"
-        keyboardType={type}
-      />
-    </View>
-  );
 
   return (
     <SafeAreaView style={styles.container}>
@@ -195,7 +195,6 @@ const styles = StyleSheet.create({
   // BOTTOM NAVBAR
   bottomBar: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
-    marginBottom: 20,
     backgroundColor: COLORS.white,
     padding: 20,
     paddingBottom: Platform.OS === 'ios' ? 30 : 20,

@@ -1,11 +1,11 @@
-import React, { useState, useCallback } from 'react'; // <--- Added useCallback
+import React, { useState, useCallback } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, FlatList, 
   Alert, Modal, ScrollView, ActivityIndicator, StatusBar, 
   Dimensions, SafeAreaView, Platform, RefreshControl, Image 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from '@react-navigation/native'; // <--- NEW IMPORT
+import { useFocusEffect } from '@react-navigation/native';
 import * as Print from 'expo-print'; 
 import { supabase } from '../lib/supabase';
 
@@ -17,6 +17,7 @@ const COLORS = {
   success: '#10B981',    
   danger: '#EF4444',     
   warning: '#F59E0B',
+  print: '#6366F1',
   dark: '#111827',       
   gray: '#9CA3AF',       
   light: '#F3F4F6',      
@@ -36,13 +37,17 @@ export default function MerchantScreen({ user }) {
   const [cartModalVisible, setCartModalVisible] = useState(false);
   const [receiptVisible, setReceiptVisible] = useState(false);
   const [lastTransaction, setLastTransaction] = useState(null);
+  
+  // Profile State
   const [storeName, setStoreName] = useState("MY STORE");
+  const [avatarUrl, setAvatarUrl] = useState(null); 
+  const [imageError, setImageError] = useState(false); 
+
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [processing, setProcessing] = useState(false);
 
-  // --- REPLACED useEffect WITH useFocusEffect ---
-  // This ensures data reloads EVERY time you switch to this tab
+  // --- DATA LOADING ---
   useFocusEffect(
     useCallback(() => {
       fetchData();
@@ -50,33 +55,49 @@ export default function MerchantScreen({ user }) {
   );
 
   const fetchData = async () => {
-    // We don't set loading=true here to avoid a "flash" every time you switch tabs
-    // unless it is an explicit pull-to-refresh
     if (refreshing) setLoading(true);
 
-    // A. Fetch Products
-    const { data: prodData, error: prodError } = await supabase
-      .from('products')
-      .select('*')
-      .order('name');
-
-    if (prodError) Alert.alert("Error", prodError.message);
-    else setProducts(prodData || []);
-
-    // B. Fetch Store Name
-    if (user?.store_name) {
-      setStoreName(user.store_name);
-    } 
-    else if (user?.id) {
-      const { data: profileData } = await supabase
+    let currentStore = user?.store_name;
+    
+    // 1. ALWAYS FETCH PROFILE
+    if (user?.id) {
+      console.log("Fetching profile for:", user.id);
+      const { data: profile, error } = await supabase
         .from('profiles')
-        .select('store_name')
+        .select('store_name, avatar_url') 
         .eq('id', user.id)
         .single();
       
-      if (profileData?.store_name) {
-        setStoreName(profileData.store_name);
+      if (error) console.log("Profile Fetch Error:", error.message);
+
+      if (profile) {
+        currentStore = profile.store_name;
+        
+        if (profile.avatar_url) {
+           console.log("Avatar URL Found:", profile.avatar_url);
+           // Force reload by adding a timestamp
+           setAvatarUrl(`${profile.avatar_url}?t=${new Date().getTime()}`);
+           setImageError(false);
+        } else {
+           console.log("No Avatar URL in database");
+        }
       }
+    }
+
+    if (currentStore) setStoreName(currentStore);
+
+    // 2. FETCH PRODUCTS
+    if (currentStore) {
+      const { data: prodData, error: prodError } = await supabase
+        .from('products')
+        .select('*')
+        .eq('store_name', currentStore)
+        .order('name');
+
+      if (prodError) Alert.alert("Error", prodError.message);
+      else setProducts(prodData || []);
+    } else {
+      setProducts([]);
     }
 
     setLoading(false);
@@ -102,6 +123,17 @@ export default function MerchantScreen({ user }) {
       setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
     } else {
       setCart([...cart, { ...product, qty: 1 }]);
+    }
+  };
+
+  const decrementFromCart = (product) => {
+    const existing = cart.find(item => item.id === product.id);
+    if (!existing) return;
+
+    if (existing.qty === 1) {
+      removeFromCart(product.id);
+    } else {
+      setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty - 1 } : item));
     }
   };
 
@@ -150,7 +182,6 @@ export default function MerchantScreen({ user }) {
       return;
     }
 
-    // Update Inventory
     for (const item of cart) {
       const currentStock = item.stock || 0;
       const newStock = currentStock - item.qty;
@@ -174,7 +205,6 @@ export default function MerchantScreen({ user }) {
     setProcessing(false);
   };
 
-  // --- PRINTING ---
   const handlePrint = async () => {
     if (!lastTransaction) return;
     try {
@@ -218,7 +248,6 @@ export default function MerchantScreen({ user }) {
     }
   };
 
-  // --- RENDERERS ---
   const renderProduct = ({ item }) => {
     const stockCount = item.stock ?? 0;
     const isOutOfStock = stockCount <= 0;
@@ -239,18 +268,8 @@ export default function MerchantScreen({ user }) {
               <Ionicons name="image-outline" size={40} color="#CBD5E1" />
             </View>
           )}
-          
-          {/* BADGES */}
-          {isOutOfStock && (
-            <View style={styles.badgeOverlay}>
-              <Text style={styles.badgeText}>SOLD OUT</Text>
-            </View>
-          )}
-          {!isOutOfStock && isLowStock && (
-            <View style={[styles.badgeOverlay, { backgroundColor: COLORS.warning }]}>
-              <Text style={styles.badgeText}>LOW STOCK</Text>
-            </View>
-          )}
+          {isOutOfStock && <View style={styles.badgeOverlay}><Text style={styles.badgeText}>SOLD OUT</Text></View>}
+          {!isOutOfStock && isLowStock && <View style={[styles.badgeOverlay, { backgroundColor: COLORS.warning }]}><Text style={styles.badgeText}>LOW STOCK</Text></View>}
         </View>
 
         <View style={styles.cardInfo}>
@@ -272,13 +291,21 @@ export default function MerchantScreen({ user }) {
 
   const renderCartItem = ({ item }) => (
     <View style={styles.cartRow}>
-      <View style={styles.qtyBadge}><Text style={styles.qtyText}>{item.qty}</Text></View>
+      <View style={styles.qtyControlContainer}>
+        <TouchableOpacity onPress={() => decrementFromCart(item)} style={styles.qtyBtnSmall}>
+          <Ionicons name="remove" size={16} color={COLORS.dark} />
+        </TouchableOpacity>
+        <View style={styles.qtyBadge}><Text style={styles.qtyText}>{item.qty}</Text></View>
+        <TouchableOpacity onPress={() => addToCart(item)} style={styles.qtyBtnSmall}>
+          <Ionicons name="add" size={16} color={COLORS.dark} />
+        </TouchableOpacity>
+      </View>
       <View style={styles.cartDetails}>
         <Text style={styles.cartName} numberOfLines={1}>{item.name}</Text>
         <Text style={styles.cartPrice}>₱{(item.price * item.qty).toFixed(2)}</Text>
       </View>
       <TouchableOpacity onPress={() => removeFromCart(item.id)} style={styles.trashBtn}>
-        <Ionicons name="close-circle" size={24} color={COLORS.danger} />
+        <Ionicons name="trash-outline" size={20} color={COLORS.danger} />
       </TouchableOpacity>
     </View>
   );
@@ -287,12 +314,28 @@ export default function MerchantScreen({ user }) {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor={COLORS.dark} />
       
-      {/* HEADER */}
       <View style={styles.header}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.welcomeText}>Welcome,</Text>
-          <Text style={styles.cashierName} numberOfLines={1}>{user?.first_name || "Merchant"}</Text>
+        <View style={styles.profileContainer}>
+          {avatarUrl && !imageError ? (
+            <Image 
+              source={{ uri: avatarUrl }} 
+              style={styles.profileAvatar} 
+              onError={(e) => {
+                console.log("Image Load Error:", e.nativeEvent.error);
+                setImageError(true);
+              }} 
+            />
+          ) : (
+            <View style={[styles.profileAvatar, styles.placeholderAvatar]}>
+              <Text style={styles.avatarInitials}>{user?.first_name?.[0]?.toUpperCase() || "U"}</Text>
+            </View>
+          )}
+          <View>
+            <Text style={styles.welcomeText}>Welcome,</Text>
+            <Text style={styles.cashierName} numberOfLines={1}>{user?.first_name || "Merchant"}</Text>
+          </View>
         </View>
+        
         <View style={styles.storeBadge}>
           <Ionicons name="storefront" size={14} color={COLORS.white} />
           <Text style={styles.storeText} numberOfLines={1}>{storeName}</Text>
@@ -300,7 +343,6 @@ export default function MerchantScreen({ user }) {
       </View>
 
       <View style={styles.body}>
-        {/* PRODUCTS GRID */}
         <View style={isTablet ? styles.leftPane : styles.fullPane}>
           <Text style={styles.sectionHeader}>Menu</Text>
           {loading && !refreshing ? (
@@ -320,7 +362,6 @@ export default function MerchantScreen({ user }) {
           )}
         </View>
 
-        {/* TABLET SIDEBAR */}
         {isTablet && (
           <View style={styles.rightPane}>
             <View style={styles.cartHeader}>
@@ -340,7 +381,6 @@ export default function MerchantScreen({ user }) {
         )}
       </View>
 
-      {/* MOBILE BOTTOM BAR */}
       {!isTablet && cart.length > 0 && (
         <View style={styles.bottomBarContainer}>
           <TouchableOpacity style={styles.bottomBar} onPress={() => setCartModalVisible(true)} activeOpacity={0.9}>
@@ -351,7 +391,6 @@ export default function MerchantScreen({ user }) {
         </View>
       )}
 
-      {/* CART MODAL */}
       <Modal visible={cartModalVisible} animationType="slide" presentationStyle="pageSheet">
         <View style={styles.mobileModalContainer}>
           <View style={styles.mobileModalHeader}>
@@ -372,7 +411,6 @@ export default function MerchantScreen({ user }) {
         </View>
       </Modal>
 
-      {/* RECEIPT MODAL */}
       <Modal visible={receiptVisible} animationType="fade" transparent={true}>
         <View style={styles.modalOverlay}>
           <View style={styles.receiptContainer}>
@@ -414,61 +452,54 @@ export default function MerchantScreen({ user }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#F8F9FA' },
-  header: { backgroundColor: COLORS.dark, paddingTop: Platform.OS === 'android' ? 40 : 10, paddingBottom: 20, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', ...COLORS.cardShadow },
+  header: { backgroundColor: COLORS.dark, paddingTop: Platform.OS === 'android' ? 40 : 10, paddingBottom: 20, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', ...COLORS.cardShadow },
+  
+  profileContainer: { flexDirection: 'row', alignItems: 'center' },
+  profileAvatar: { width: 40, height: 40, borderRadius: 20, marginRight: 10, borderWidth: 1, borderColor: '#fff' },
+  placeholderAvatar: { backgroundColor: COLORS.primary, justifyContent: 'center', alignItems: 'center' },
+  avatarInitials: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+
   welcomeText: { color: COLORS.gray, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1 },
-  cashierName: { color: COLORS.white, fontSize: 18, fontWeight: 'bold' },
+  cashierName: { color: COLORS.white, fontSize: 16, fontWeight: 'bold' },
   storeBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.1)', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 12 },
   storeText: { color: COLORS.white, marginLeft: 5, fontWeight: '600', fontSize: 11 },
+  
   body: { flex: 1, flexDirection: 'row', padding: 15 },
   leftPane: { flex: 0.65, paddingRight: 10 }, 
   fullPane: { flex: 1 }, 
   rightPane: { flex: 0.35, backgroundColor: COLORS.white, borderRadius: 16, padding: 15, ...COLORS.cardShadow },
   sectionHeader: { fontSize: 18, fontWeight: '800', color: COLORS.dark, marginBottom: 15 },
   
-  // CARD STYLES
-  cardMobile: { 
-    backgroundColor: COLORS.white, width: '48%', borderRadius: 16, marginBottom: 15, 
-    ...COLORS.cardShadow, overflow: 'hidden', minHeight: 220 
-  },
-  cardTablet: { 
-    backgroundColor: COLORS.white, width: '32%', borderRadius: 16, marginBottom: 15, 
-    ...COLORS.cardShadow, overflow: 'hidden', minHeight: 240 
-  },
+  cardMobile: { backgroundColor: COLORS.white, width: '48%', borderRadius: 16, marginBottom: 15, ...COLORS.cardShadow, overflow: 'hidden', minHeight: 220 },
+  cardTablet: { backgroundColor: COLORS.white, width: '32%', borderRadius: 16, marginBottom: 15, ...COLORS.cardShadow, overflow: 'hidden', minHeight: 240 },
   cardDisabled: { opacity: 0.6 },
   imageContainer: { height: 140, width: '100%', backgroundColor: '#F3F4F6', position: 'relative' },
   productImage: { width: '100%', height: '100%' },
   placeholderImage: { justifyContent: 'center', alignItems: 'center' },
-  badgeOverlay: { 
-    position: 'absolute', top: 10, left: 10, backgroundColor: COLORS.danger, 
-    paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4, zIndex: 10 
-  },
+  badgeOverlay: { position: 'absolute', top: 10, left: 10, backgroundColor: COLORS.danger, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4, zIndex: 10 },
   badgeText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
   cardInfo: { padding: 12, flex: 1, justifyContent: 'space-between' },
   cardTitle: { fontSize: 15, fontWeight: '700', color: COLORS.dark, marginBottom: 4 },
   cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 5 },
   cardPrice: { fontSize: 16, fontWeight: 'bold', color: COLORS.primary },
   stockLabel: { fontSize: 11, color: COLORS.gray },
-  floatingAddBtn: {
-    position: 'absolute', bottom: 10, right: 10,
-    backgroundColor: COLORS.dark, width: 32, height: 32, borderRadius: 16,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3
-  },
+  floatingAddBtn: { position: 'absolute', bottom: 10, right: 10, backgroundColor: COLORS.dark, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3 },
 
   // CART & MODALS
   cartListContainer: { flex: 1 },
-  emptyCart: { flex: 1, alignItems: 'center', justifyContent: 'center', marginTop: 50 },
-  emptyCartText: { color: COLORS.gray, marginTop: 10 },
-  cartRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, backgroundColor: '#F9FAFB', padding: 10, borderRadius: 10 },
-  qtyBadge: { backgroundColor: COLORS.dark, width: 24, height: 24, borderRadius: 8, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
-  qtyText: { color: COLORS.white, fontSize: 12, fontWeight: 'bold' },
+  cartRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, backgroundColor: '#F9FAFB', padding: 8, borderRadius: 10 },
+  qtyControlContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, borderRadius: 8, borderWidth: 1, borderColor: '#E5E7EB', marginRight: 10 },
+  qtyBtnSmall: { padding: 8 },
+  qtyBadge: { width: 24, alignItems: 'center', justifyContent: 'center' },
+  qtyText: { color: COLORS.dark, fontSize: 14, fontWeight: 'bold' },
   cartDetails: { flex: 1 },
   cartName: { fontSize: 13, fontWeight: '600', color: COLORS.dark },
   cartPrice: { fontSize: 13, color: COLORS.primary, fontWeight: '700' },
+  trashBtn: { padding: 5 },
+
   bottomBarContainer: { position: 'absolute', bottom: 20, left: 20, right: 20, elevation: 10, zIndex: 999 },
   bottomBar: { backgroundColor: COLORS.dark, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
   badgeContainer: { backgroundColor: COLORS.primary, borderRadius: 12, width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
-  badgeText: { color: '#fff', fontWeight: 'bold', fontSize: 12 },
   viewCartText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   bottomBarTotal: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   checkoutSection: { borderTopWidth: 1, borderTopColor: '#F3F4F6', paddingTop: 15 },
