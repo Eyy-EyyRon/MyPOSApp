@@ -1,12 +1,13 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, FlatList, 
-  Alert, Modal, ScrollView, ActivityIndicator, StatusBar, 
+  Alert, Modal, TextInput, StatusBar, 
   Dimensions, SafeAreaView, Platform, RefreshControl, Image 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Print from 'expo-print'; 
+import * as Haptics from 'expo-haptics'; // ⚡ NEW: Tactile feedback
 import { supabase } from '../lib/supabase';
 
 const { width } = Dimensions.get('window');
@@ -14,10 +15,10 @@ const isTablet = width >= 768;
 
 const COLORS = {
   primary: '#4F46E5',    
+  secondary: '#1E1B4B',
+  accent: '#F59E0B',     // Gold for goals
   success: '#10B981',    
   danger: '#EF4444',     
-  warning: '#F59E0B',
-  print: '#6366F1',
   dark: '#111827',       
   gray: '#9CA3AF',       
   light: '#F3F4F6',      
@@ -27,25 +28,29 @@ const COLORS = {
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1,
     shadowRadius: 8,
-    elevation: 5,
+    elevation: 4,
   }
 };
 
 export default function MerchantScreen({ user }) {
+  // --- STATE ---
   const [products, setProducts] = useState([]);
   const [cart, setCart] = useState([]);
   const [cartModalVisible, setCartModalVisible] = useState(false);
   const [receiptVisible, setReceiptVisible] = useState(false);
   const [lastTransaction, setLastTransaction] = useState(null);
   
-  // Profile State
-  const [storeName, setStoreName] = useState("MY STORE");
-  const [avatarUrl, setAvatarUrl] = useState(null); 
-  const [imageError, setImageError] = useState(false); 
-
+  // UI State
+  const [storeName, setStoreName] = useState("Loading...");
+  const [avatarUrl, setAvatarUrl] = useState(null);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [processing, setProcessing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  
+  // Performance Stats
+  const [shiftSales, setShiftSales] = useState(0);
+  const [shiftCount, setShiftCount] = useState(0);
 
   // --- DATA LOADING ---
   useFocusEffect(
@@ -55,53 +60,49 @@ export default function MerchantScreen({ user }) {
   );
 
   const fetchData = async () => {
-    if (refreshing) setLoading(true);
+    try {
+      if (refreshing) setLoading(true);
+      if (!user || !user.id) return;
 
-    let currentStore = user?.store_name;
-    
-    // 1. ALWAYS FETCH PROFILE
-    if (user?.id) {
-      console.log("Fetching profile for:", user.id);
-      const { data: profile, error } = await supabase
+      // 1. FETCH PROFILE
+      const { data: profile } = await supabase
         .from('profiles')
         .select('store_name, avatar_url') 
         .eq('id', user.id)
         .single();
       
-      if (error) console.log("Profile Fetch Error:", error.message);
+      const currentStore = profile?.store_name || user.store_name || "My Store";
+      setStoreName(currentStore);
+      if (profile?.avatar_url) setAvatarUrl(`${profile.avatar_url}?t=${Date.now()}`);
 
-      if (profile) {
-        currentStore = profile.store_name;
+      // 2. FETCH PRODUCTS
+      if (currentStore) {
+        const { data: prodData } = await supabase
+          .from('products')
+          .select('*')
+          .eq('store_name', currentStore)
+          .order('name');
+        setProducts(prodData || []);
+
+        // 3. FETCH TODAY'S STATS (Gamification)
+        const today = new Date().toISOString().split('T')[0];
+        const { data: salesToday } = await supabase
+          .from('sales')
+          .select('total_amount')
+          .eq('store_name', currentStore)
+          .gte('sale_date', today); // Sales since midnight
         
-        if (profile.avatar_url) {
-           console.log("Avatar URL Found:", profile.avatar_url);
-           // Force reload by adding a timestamp
-           setAvatarUrl(`${profile.avatar_url}?t=${new Date().getTime()}`);
-           setImageError(false);
-        } else {
-           console.log("No Avatar URL in database");
-        }
+        const total = (salesToday || []).reduce((sum, s) => sum + s.total_amount, 0);
+        setShiftSales(total);
+        setShiftCount(salesToday?.length || 0);
       }
+
+    } catch (e) {
+      console.log(e);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
-
-    if (currentStore) setStoreName(currentStore);
-
-    // 2. FETCH PRODUCTS
-    if (currentStore) {
-      const { data: prodData, error: prodError } = await supabase
-        .from('products')
-        .select('*')
-        .eq('store_name', currentStore)
-        .order('name');
-
-      if (prodError) Alert.alert("Error", prodError.message);
-      else setProducts(prodData || []);
-    } else {
-      setProducts([]);
-    }
-
-    setLoading(false);
-    setRefreshing(false);
   };
 
   const onRefresh = () => {
@@ -109,15 +110,31 @@ export default function MerchantScreen({ user }) {
     fetchData();
   };
 
-  // --- CART LOGIC ---
+  // --- FILTERING LOGIC ---
+  // Extract unique categories dynamically
+  const categories = useMemo(() => {
+    const cats = ['All'];
+    // If you have a 'category' column, uncomment the next line:
+    // products.forEach(p => { if(p.category && !cats.includes(p.category)) cats.push(p.category) });
+    // For now, let's fake it if column is missing, or just stick to 'All'
+    return cats; 
+  }, [products]);
+
+  const filteredProducts = products.filter(p => {
+    const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
+    return matchesSearch && matchesCategory;
+  });
+
+  // --- CART FUNCTIONS ---
   const addToCart = (product) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); // ⚡ Haptic click
+    
     const currentStock = product.stock ?? 0;
     if (currentStock <= 0) return Alert.alert("Out of Stock", "Item unavailable.");
     
     const existing = cart.find(item => item.id === product.id);
-    if (existing && existing.qty + 1 > currentStock) {
-      return Alert.alert("Low Stock", `Only ${currentStock} available.`);
-    }
+    if (existing && existing.qty + 1 > currentStock) return Alert.alert("Low Stock", `Only ${currentStock} available.`);
     
     if (existing) {
       setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
@@ -126,19 +143,18 @@ export default function MerchantScreen({ user }) {
     }
   };
 
-  const decrementFromCart = (product) => {
-    const existing = cart.find(item => item.id === product.id);
-    if (!existing) return;
-
-    if (existing.qty === 1) {
-      removeFromCart(product.id);
-    } else {
-      setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty - 1 } : item));
-    }
+  const removeFromCart = (productId) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setCart(cart.filter(item => item.id !== productId));
   };
 
-  const removeFromCart = (productId) => {
-    setCart(cart.filter(item => item.id !== productId));
+  const updateQty = (item, change) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (item.qty + change < 1) return removeFromCart(item.id);
+    // Check stock limit
+    if (change > 0 && item.qty + 1 > item.stock) return; 
+
+    setCart(cart.map(p => p.id === item.id ? { ...p, qty: p.qty + change } : p));
   };
 
   const calculateTotal = () => cart.reduce((sum, item) => sum + (item.price * item.qty), 0).toFixed(2);
@@ -146,11 +162,12 @@ export default function MerchantScreen({ user }) {
 
   // --- CHECKOUT ---
   const handleCheckout = async () => {
-    if (cart.length === 0) return Alert.alert("Empty Cart", "Add items to start.");
-    setProcessing(true);
+    if (cart.length === 0) return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success); // ⚡ Success vibration
+
     const total = parseFloat(calculateTotal());
     
-    const { data: saleData, error: saleError } = await supabase
+    const { data: saleData, error } = await supabase
       .from('sales')
       .insert([{
         store_name: storeName,
@@ -161,380 +178,289 @@ export default function MerchantScreen({ user }) {
       .select()
       .single();
 
-    if (saleError) {
-      Alert.alert("Sale Error", saleError.message);
-      setProcessing(false);
-      return;
-    }
-    const saleId = saleData.id;
-
+    if (error) { Alert.alert("Error", error.message); return; }
+    
     const salesItemsData = cart.map(item => ({
-      sale_id: saleId,
-      product_id: item.id,
-      quantity: item.qty,
-      unit_price: item.price
+      sale_id: saleData.id, product_id: item.id, quantity: item.qty, unit_price: item.price
     }));
 
-    const { error: itemsError } = await supabase.from('sales_items').insert(salesItemsData);
-    if (itemsError) {
-      Alert.alert("Item Error", itemsError.message);
-      setProcessing(false);
-      return;
-    }
+    await supabase.from('sales_items').insert(salesItemsData);
 
+    // Update Stock
     for (const item of cart) {
-      const currentStock = item.stock || 0;
-      const newStock = currentStock - item.qty;
-      await supabase.from('products').update({ stock: newStock }).eq('id', item.id);
+      await supabase.from('products').update({ stock: item.stock - item.qty }).eq('id', item.id);
     }
 
-    await fetchData(); 
+    setLastTransaction({ id: saleData.id.toString(), date: new Date().toLocaleString(), items: [...cart], total: total.toFixed(2) });
+    
+    // Update Shift Stats Locally (Instant Feedback)
+    setShiftSales(prev => prev + total);
+    setShiftCount(prev => prev + 1);
 
-    const transaction = {
-      id: saleId.toString(),
-      date: new Date().toLocaleString(),
-      store_name: storeName,
-      items: [...cart],
-      total: total.toFixed(2),
-    };
-
-    setLastTransaction(transaction);
     setReceiptVisible(true);
     setCart([]); 
     setCartModalVisible(false);
-    setProcessing(false);
+    fetchData(); // Sync background
   };
 
+  // --- PRINT ---
   const handlePrint = async () => {
     if (!lastTransaction) return;
-    try {
-      const itemsHtml = lastTransaction.items.map(item => `
-        <div class="row">
-          <span>${item.qty}x ${item.name}</span>
-          <span>P${(item.qty * item.price).toFixed(2)}</span>
-        </div>
-      `).join('');
-
-      const html = `
-        <html>
-          <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-            <style>
-              body { font-family: 'Courier New', monospace; text-align: center; padding: 20px; }
-              .header { font-size: 22px; font-weight: bold; margin-bottom: 5px; text-transform: uppercase; }
-              .sub { font-size: 12px; color: #555; margin-bottom: 15px; }
-              .line { border-bottom: 1px dashed #000; margin: 10px 0; }
-              .row { display: flex; justify-content: space-between; margin: 5px 0; }
-              .total { font-size: 18px; font-weight: bold; margin-top: 10px; border-top: 2px solid #000; padding-top: 10px; }
-            </style>
-          </head>
-          <body>
-            <div class="header">${storeName}</div>
-            <div class="sub">OFFICIAL RECEIPT</div>
-            <div class="line"></div>
-            <div style="text-align:left;">Date: ${lastTransaction.date}</div>
-            <div style="text-align:left;">Ref #: ${lastTransaction.id}</div>
-            <div class="line"></div>
-            ${itemsHtml}
-            <div class="line"></div>
-            <div class="row total"><span>TOTAL</span><span>P${lastTransaction.total}</span></div>
-            <div style="margin-top:20px; font-size:12px; color:#555;">Thank you!</div>
-          </body>
-        </html>
-      `;
-      await Print.printAsync({ html });
-    } catch (error) {
-      Alert.alert("Printing Error", error.message);
-    }
+    const itemsHtml = lastTransaction.items.map(item => `<div class="row"><span>${item.qty}x ${item.name}</span><span>P${(item.qty * item.price).toFixed(2)}</span></div>`).join('');
+    const html = `<html><head><style>body{font-family:'Courier New';text-align:center;padding:20px}.header{font-size:22px;font-weight:bold;margin-bottom:5px}.line{border-bottom:1px dashed #000;margin:10px 0}.row{display:flex;justify-content:space-between;margin:5px 0}.total{font-size:18px;font-weight:bold;margin-top:10px;border-top:2px solid #000;padding-top:10px}</style></head><body><div class="header">${storeName}</div><div class="line"></div><div style="text-align:left">Date: ${lastTransaction.date}</div><div class="line"></div>${itemsHtml}<div class="line"></div><div class="row total"><span>TOTAL</span><span>P${lastTransaction.total}</span></div></body></html>`;
+    await Print.printAsync({ html });
   };
 
+  // --- RENDERERS ---
   const renderProduct = ({ item }) => {
-    const stockCount = item.stock ?? 0;
-    const isOutOfStock = stockCount <= 0;
-    const isLowStock = stockCount > 0 && stockCount <= 5;
-
+    const isOutOfStock = (item.stock || 0) <= 0;
     return (
       <TouchableOpacity 
-        style={[isTablet ? styles.cardTablet : styles.cardMobile, isOutOfStock && styles.cardDisabled]} 
-        onPress={() => addToCart(item)}
-        activeOpacity={0.8}
+        style={[styles.productCard, isOutOfStock && styles.cardDisabled]} 
+        onPress={() => addToCart(item)} 
         disabled={isOutOfStock}
+        activeOpacity={0.7}
       >
-        <View style={styles.imageContainer}>
-          {item.image_url ? (
-            <Image source={{ uri: item.image_url }} style={styles.productImage} resizeMode="cover" />
-          ) : (
-            <View style={[styles.productImage, styles.placeholderImage]}>
-              <Ionicons name="image-outline" size={40} color="#CBD5E1" />
-            </View>
-          )}
-          {isOutOfStock && <View style={styles.badgeOverlay}><Text style={styles.badgeText}>SOLD OUT</Text></View>}
-          {!isOutOfStock && isLowStock && <View style={[styles.badgeOverlay, { backgroundColor: COLORS.warning }]}><Text style={styles.badgeText}>LOW STOCK</Text></View>}
+        <View style={styles.imgWrapper}>
+           {item.image_url ? 
+             <Image source={{ uri: item.image_url }} style={styles.prodImage} resizeMode="cover" /> : 
+             <View style={styles.placeholderImg}><Ionicons name="fast-food-outline" size={30} color="#CBD5E1" /></View>
+           }
+           {isOutOfStock && <View style={styles.soldBadge}><Text style={styles.soldText}>SOLD OUT</Text></View>}
         </View>
-
-        <View style={styles.cardInfo}>
-          <Text style={styles.cardTitle} numberOfLines={2}>{item.name}</Text>
-          <View style={styles.cardFooter}>
-            <Text style={styles.cardPrice}>₱{item.price.toFixed(2)}</Text>
-            <Text style={styles.stockLabel}>{stockCount} left</Text>
-          </View>
+        <View style={styles.prodInfo}>
+          <Text style={styles.prodName} numberOfLines={2}>{item.name}</Text>
+          <Text style={styles.prodPrice}>₱{item.price.toFixed(0)}</Text>
         </View>
-
-        {!isOutOfStock && (
-          <View style={styles.floatingAddBtn}>
-            <Ionicons name="add" size={20} color="#fff" />
-          </View>
-        )}
+        <View style={styles.addBtn}>
+          <Ionicons name="add" size={20} color="#FFF" />
+        </View>
       </TouchableOpacity>
     );
   };
 
   const renderCartItem = ({ item }) => (
     <View style={styles.cartRow}>
-      <View style={styles.qtyControlContainer}>
-        <TouchableOpacity onPress={() => decrementFromCart(item)} style={styles.qtyBtnSmall}>
-          <Ionicons name="remove" size={16} color={COLORS.dark} />
-        </TouchableOpacity>
-        <View style={styles.qtyBadge}><Text style={styles.qtyText}>{item.qty}</Text></View>
-        <TouchableOpacity onPress={() => addToCart(item)} style={styles.qtyBtnSmall}>
-          <Ionicons name="add" size={16} color={COLORS.dark} />
-        </TouchableOpacity>
+      <View>
+        <Text style={styles.cartItemName}>{item.name}</Text>
+        <Text style={styles.cartItemPrice}>₱{(item.price * item.qty).toFixed(2)}</Text>
       </View>
-      <View style={styles.cartDetails}>
-        <Text style={styles.cartName} numberOfLines={1}>{item.name}</Text>
-        <Text style={styles.cartPrice}>₱{(item.price * item.qty).toFixed(2)}</Text>
+      <View style={styles.qtyControls}>
+        <TouchableOpacity onPress={() => updateQty(item, -1)} style={styles.qtyBtn}><Ionicons name="remove" size={16} color={COLORS.dark} /></TouchableOpacity>
+        <Text style={styles.qtyNum}>{item.qty}</Text>
+        <TouchableOpacity onPress={() => updateQty(item, 1)} style={styles.qtyBtn}><Ionicons name="add" size={16} color={COLORS.dark} /></TouchableOpacity>
       </View>
-      <TouchableOpacity onPress={() => removeFromCart(item.id)} style={styles.trashBtn}>
-        <Ionicons name="trash-outline" size={20} color={COLORS.danger} />
-      </TouchableOpacity>
     </View>
   );
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor={COLORS.dark} />
+      <StatusBar barStyle="light-content" backgroundColor={COLORS.secondary} />
       
+      {/* 🚀 HEADER: "THE COCKPIT" */}
       <View style={styles.header}>
-        <View style={styles.profileContainer}>
-          {avatarUrl && !imageError ? (
-            <Image 
-              source={{ uri: avatarUrl }} 
-              style={styles.profileAvatar} 
-              onError={(e) => {
-                console.log("Image Load Error:", e.nativeEvent.error);
-                setImageError(true);
-              }} 
-            />
-          ) : (
-            <View style={[styles.profileAvatar, styles.placeholderAvatar]}>
-              <Text style={styles.avatarInitials}>{user?.first_name?.[0]?.toUpperCase() || "U"}</Text>
-            </View>
-          )}
-          <View>
-            <Text style={styles.welcomeText}>Welcome,</Text>
-            <Text style={styles.cashierName} numberOfLines={1}>{user?.first_name || "Merchant"}</Text>
-          </View>
-        </View>
-        
-        <View style={styles.storeBadge}>
-          <Ionicons name="storefront" size={14} color={COLORS.white} />
-          <Text style={styles.storeText} numberOfLines={1}>{storeName}</Text>
-        </View>
-      </View>
-
-      <View style={styles.body}>
-        <View style={isTablet ? styles.leftPane : styles.fullPane}>
-          <Text style={styles.sectionHeader}>Menu</Text>
-          {loading && !refreshing ? (
-            <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 50 }} />
-          ) : (
-            <FlatList 
-              data={products}
-              renderItem={renderProduct}
-              keyExtractor={item => item.id.toString()}
-              numColumns={isTablet ? 3 : 2}
-              columnWrapperStyle={{ justifyContent: 'space-between' }}
-              showsVerticalScrollIndicator={false}
-              contentContainerStyle={{ paddingBottom: 120, paddingTop: 5 }}
-              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
-              ListEmptyComponent={<View style={styles.emptyState}><Text style={styles.emptyStateText}>No products found.</Text></View>}
-            />
-          )}
-        </View>
-
-        {isTablet && (
-          <View style={styles.rightPane}>
-            <View style={styles.cartHeader}>
-              <Text style={styles.sectionHeader}>Order</Text>
-              <TouchableOpacity onPress={() => setCart([])}><Text style={styles.clearText}>Clear</Text></TouchableOpacity>
-            </View>
-            <View style={{ flex: 1 }}>
-              <FlatList data={cart} renderItem={renderCartItem} keyExtractor={item => item.id.toString()} />
-              <View style={styles.checkoutSection}>
-                <View style={styles.totalRow}><Text style={styles.totalLabel}>Total</Text><Text style={styles.totalValue}>₱{calculateTotal()}</Text></View>
-                <TouchableOpacity style={[styles.checkoutBtn, (cart.length === 0 || processing) && styles.disabledBtn]} onPress={handleCheckout} disabled={cart.length === 0 || processing}>
-                  {processing ? <ActivityIndicator color="#fff" /> : <Text style={styles.checkoutText}>CONFIRM SALE</Text>}
-                </TouchableOpacity>
+        <View style={styles.headerTop}>
+          <View style={{flexDirection:'row', alignItems:'center'}}>
+            {avatarUrl ? <Image source={{ uri: avatarUrl }} style={styles.avatar} /> : 
+              <View style={[styles.avatar, {backgroundColor: COLORS.primary, justifyContent:'center', alignItems:'center'}]}>
+                <Text style={{color:'#fff', fontWeight:'bold'}}>{user?.first_name?.[0]}</Text>
               </View>
+            }
+            <View style={{marginLeft: 10}}>
+              <Text style={styles.greeting}>Good shift, {user?.first_name}!</Text>
+              <Text style={styles.storeLabel}>{storeName}</Text>
             </View>
           </View>
-        )}
+          <TouchableOpacity onPress={fetchData} style={styles.refreshBtn}>
+             <Ionicons name="sync" size={20} color="#fff" />
+          </TouchableOpacity>
+        </View>
+
+        {/* 🏆 GAMIFICATION: SHIFT STATS */}
+        <View style={styles.statsBar}>
+          <View style={styles.statItem}>
+            <Text style={styles.statLabel}>TODAY'S SALES</Text>
+            <Text style={styles.statValue}>₱{shiftSales.toLocaleString()}</Text>
+          </View>
+          <View style={styles.statDivider} />
+          <View style={styles.statItem}>
+            <Text style={styles.statLabel}>ORDERS</Text>
+            <Text style={styles.statValue}>{shiftCount}</Text>
+          </View>
+          <View style={styles.statDivider} />
+          <View style={styles.statItem}>
+             <Text style={styles.statLabel}>GOAL</Text>
+             {/* Dynamic Goal Message */}
+             <Text style={[styles.statValue, {color: COLORS.accent}]}>
+               {shiftSales > 5000 ? "🔥 ON FIRE" : "KEEP GOING"}
+             </Text>
+          </View>
+        </View>
       </View>
 
-      {!isTablet && cart.length > 0 && (
-        <View style={styles.bottomBarContainer}>
-          <TouchableOpacity style={styles.bottomBar} onPress={() => setCartModalVisible(true)} activeOpacity={0.9}>
-            <View style={styles.badgeContainer}><Text style={styles.badgeText}>{totalItems}</Text></View>
-            <Text style={styles.viewCartText}>View Order</Text>
-            <Text style={styles.bottomBarTotal}>₱{calculateTotal()}</Text>
+      {/* 🔍 SEARCH & FILTER */}
+      <View style={styles.searchSection}>
+        <View style={styles.searchBox}>
+          <Ionicons name="search" size={20} color={COLORS.gray} />
+          <TextInput 
+            style={styles.searchInput} 
+            placeholder="Search menu..." 
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+          />
+        </View>
+      </View>
+
+      {/* 📋 MENU GRID */}
+      <View style={styles.body}>
+        <FlatList 
+          data={filteredProducts} 
+          renderItem={renderProduct} 
+          keyExtractor={item => item.id.toString()}
+          numColumns={isTablet ? 3 : 2} 
+          columnWrapperStyle={{ justifyContent: 'space-between', paddingHorizontal: 5 }}
+          contentContainerStyle={{ paddingBottom: 100, paddingTop: 10 }}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
+          ListEmptyComponent={
+            <View style={styles.emptyState}>
+              <Ionicons name="search-outline" size={50} color={COLORS.gray} />
+              <Text style={styles.emptyText}>No items found.</Text>
+            </View>
+          }
+        />
+      </View>
+
+      {/* 🛒 FLOATING CART BAR (Bottom) */}
+      {cart.length > 0 && (
+        <View style={styles.floatBarContainer}>
+          <TouchableOpacity style={styles.floatBar} onPress={() => setCartModalVisible(true)} activeOpacity={0.9}>
+            <View style={styles.badge}><Text style={styles.badgeText}>{totalItems}</Text></View>
+            <Text style={styles.viewOrderText}>Current Order</Text>
+            <Text style={styles.floatTotal}>₱{calculateTotal()}</Text>
           </TouchableOpacity>
         </View>
       )}
 
+      {/* MODAL: CART */}
       <Modal visible={cartModalVisible} animationType="slide" presentationStyle="pageSheet">
-        <View style={styles.mobileModalContainer}>
-          <View style={styles.mobileModalHeader}>
-            <Text style={styles.mobileModalTitle}>Current Order</Text>
-            <TouchableOpacity onPress={() => setCartModalVisible(false)} style={styles.closeModalBtn}>
-              <Ionicons name="close" size={24} color={COLORS.dark} />
+        <View style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Order Summary</Text>
+            <TouchableOpacity onPress={() => setCartModalVisible(false)}><Ionicons name="close-circle" size={30} color={COLORS.gray} /></TouchableOpacity>
+          </View>
+          
+          <FlatList data={cart} renderItem={renderCartItem} keyExtractor={item => item.id.toString()} contentContainerStyle={{padding: 20}} />
+          
+          <View style={styles.checkoutArea}>
+            <View style={styles.totalRow}>
+              <Text style={styles.totalLabel}>Total Amount</Text>
+              <Text style={styles.totalBig}>₱{calculateTotal()}</Text>
+            </View>
+            <TouchableOpacity style={styles.checkoutBtn} onPress={handleCheckout}>
+              <Text style={styles.checkoutText}>CONFIRM PAYMENT</Text>
+              <Ionicons name="arrow-forward" size={20} color="#fff" />
             </TouchableOpacity>
           </View>
-          <View style={{ flex: 1, padding: 20 }}>
-            <FlatList data={cart} renderItem={renderCartItem} keyExtractor={item => item.id.toString()} />
-            <View style={styles.checkoutSection}>
-              <View style={styles.totalRow}><Text style={styles.totalLabel}>Total</Text><Text style={styles.totalValue}>₱{calculateTotal()}</Text></View>
-              <TouchableOpacity style={[styles.checkoutBtn, (cart.length === 0 || processing) && styles.disabledBtn]} onPress={handleCheckout} disabled={cart.length === 0 || processing}>
-                {processing ? <ActivityIndicator color="#fff" /> : <Text style={styles.checkoutText}>CONFIRM SALE</Text>}
+        </View>
+      </Modal>
+
+      {/* MODAL: RECEIPT */}
+      <Modal visible={receiptVisible} animationType="fade" transparent>
+        <View style={styles.overlay}>
+          <View style={styles.receiptCard}>
+            <View style={styles.successIcon}><Ionicons name="checkmark" size={40} color="#fff" /></View>
+            <Text style={styles.successTitle}>Payment Received!</Text>
+            <Text style={styles.successSub}>Total: ₱{lastTransaction?.total}</Text>
+            
+            <View style={styles.receiptActions}>
+              <TouchableOpacity style={[styles.actionBtn, {backgroundColor: COLORS.secondary}]} onPress={handlePrint}>
+                <Ionicons name="print" size={20} color="#fff" />
+                <Text style={{color:'#fff', fontWeight:'bold'}}>Print Receipt</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.actionBtn, {backgroundColor: COLORS.light}]} onPress={() => setReceiptVisible(false)}>
+                <Text style={{color: COLORS.dark, fontWeight:'bold'}}>New Sale</Text>
               </TouchableOpacity>
             </View>
           </View>
         </View>
       </Modal>
 
-      <Modal visible={receiptVisible} animationType="fade" transparent={true}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.receiptContainer}>
-            <View style={styles.receiptHeader}>
-              <Ionicons name="checkmark-circle" size={40} color={COLORS.white} />
-              <Text style={styles.receiptHeaderTitle}>Transaction Complete</Text>
-            </View>
-            <View style={styles.receiptBody}>
-              <Text style={styles.receiptStore}>{storeName}</Text>
-              <Text style={styles.receiptTime}>{lastTransaction?.date}</Text>
-              <View style={styles.divider} />
-              <ScrollView style={styles.receiptList}>
-                {lastTransaction?.items.map((item, index) => (
-                  <View key={index} style={styles.receiptItemRow}>
-                    <Text style={styles.recItemText} numberOfLines={1}>{item.qty} x {item.name}</Text>
-                    <Text style={styles.recItemPrice}>₱{(item.price * item.qty).toFixed(2)}</Text>
-                  </View>
-                ))}
-              </ScrollView>
-              <View style={styles.divider} />
-              <View style={styles.receiptTotalRow}><Text style={styles.recTotalLabel}>TOTAL PAID</Text><Text style={styles.recTotalValue}>₱{lastTransaction?.total}</Text></View>
-              <View style={styles.receiptActions}>
-                <TouchableOpacity style={styles.printBtn} onPress={handlePrint}>
-                  <Ionicons name="print-outline" size={20} color={COLORS.white} />
-                  <Text style={styles.printBtnText}>Print Receipt</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.newSaleBtn} onPress={() => setReceiptVisible(false)}>
-                  <Text style={styles.newSaleText}>New Sale</Text>
-                  <Ionicons name="arrow-forward" size={18} color={COLORS.dark} />
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#F8F9FA' },
-  header: { backgroundColor: COLORS.dark, paddingTop: Platform.OS === 'android' ? 40 : 10, paddingBottom: 20, paddingHorizontal: 20, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', ...COLORS.cardShadow },
+  container: { flex: 1, backgroundColor: '#FAFAFA' },
   
-  profileContainer: { flexDirection: 'row', alignItems: 'center' },
-  profileAvatar: { width: 40, height: 40, borderRadius: 20, marginRight: 10, borderWidth: 1, borderColor: '#fff' },
-  placeholderAvatar: { backgroundColor: COLORS.primary, justifyContent: 'center', alignItems: 'center' },
-  avatarInitials: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  // HEADER
+  header: { backgroundColor: COLORS.secondary, padding: 20, paddingTop: Platform.OS === 'android' ? 40 : 10, borderBottomLeftRadius: 24, borderBottomRightRadius: 24, ...COLORS.cardShadow, zIndex: 10 },
+  headerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  avatar: { width: 45, height: 45, borderRadius: 25, borderWidth: 2, borderColor: '#fff' },
+  greeting: { color: COLORS.gray, fontSize: 12, textTransform: 'uppercase', letterSpacing: 1 },
+  storeLabel: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  refreshBtn: { padding: 8, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12 },
 
-  welcomeText: { color: COLORS.gray, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1 },
-  cashierName: { color: COLORS.white, fontSize: 16, fontWeight: 'bold' },
-  storeBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.1)', paddingVertical: 5, paddingHorizontal: 10, borderRadius: 12 },
-  storeText: { color: COLORS.white, marginLeft: 5, fontWeight: '600', fontSize: 11 },
-  
-  body: { flex: 1, flexDirection: 'row', padding: 15 },
-  leftPane: { flex: 0.65, paddingRight: 10 }, 
-  fullPane: { flex: 1 }, 
-  rightPane: { flex: 0.35, backgroundColor: COLORS.white, borderRadius: 16, padding: 15, ...COLORS.cardShadow },
-  sectionHeader: { fontSize: 18, fontWeight: '800', color: COLORS.dark, marginBottom: 15 },
-  
-  cardMobile: { backgroundColor: COLORS.white, width: '48%', borderRadius: 16, marginBottom: 15, ...COLORS.cardShadow, overflow: 'hidden', minHeight: 220 },
-  cardTablet: { backgroundColor: COLORS.white, width: '32%', borderRadius: 16, marginBottom: 15, ...COLORS.cardShadow, overflow: 'hidden', minHeight: 240 },
+  // STATS BAR
+  statsBar: { flexDirection: 'row', backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 16, padding: 15, justifyContent: 'space-between' },
+  statItem: { alignItems: 'center', flex: 1 },
+  statLabel: { color: 'rgba(255,255,255,0.6)', fontSize: 10, fontWeight: 'bold', marginBottom: 4 },
+  statValue: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  statDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.2)' },
+
+  // SEARCH
+  searchSection: { paddingHorizontal: 20, marginTop: -25, zIndex: 20 },
+  searchBox: { flexDirection: 'row', backgroundColor: '#fff', borderRadius: 16, padding: 12, alignItems: 'center', ...COLORS.cardShadow },
+  searchInput: { flex: 1, marginLeft: 10, fontSize: 16, color: COLORS.dark },
+
+  // BODY
+  body: { flex: 1, paddingHorizontal: 15, marginTop: 10 },
+  emptyState: { alignItems: 'center', marginTop: 50, opacity: 0.5 },
+  emptyText: { marginTop: 10, fontSize: 16, fontWeight: 'bold' },
+
+  // PRODUCT CARD (Unique Look)
+  productCard: { backgroundColor: '#fff', width: '48%', borderRadius: 20, marginBottom: 15, padding: 10, ...COLORS.cardShadow, position: 'relative' },
   cardDisabled: { opacity: 0.6 },
-  imageContainer: { height: 140, width: '100%', backgroundColor: '#F3F4F6', position: 'relative' },
-  productImage: { width: '100%', height: '100%' },
-  placeholderImage: { justifyContent: 'center', alignItems: 'center' },
-  badgeOverlay: { position: 'absolute', top: 10, left: 10, backgroundColor: COLORS.danger, paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4, zIndex: 10 },
-  badgeText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
-  cardInfo: { padding: 12, flex: 1, justifyContent: 'space-between' },
-  cardTitle: { fontSize: 15, fontWeight: '700', color: COLORS.dark, marginBottom: 4 },
-  cardFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 5 },
-  cardPrice: { fontSize: 16, fontWeight: 'bold', color: COLORS.primary },
-  stockLabel: { fontSize: 11, color: COLORS.gray },
-  floatingAddBtn: { position: 'absolute', bottom: 10, right: 10, backgroundColor: COLORS.dark, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3 },
+  imgWrapper: { height: 120, borderRadius: 16, backgroundColor: '#F1F5F9', overflow: 'hidden', justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
+  prodImage: { width: '100%', height: '100%' },
+  placeholderImg: { opacity: 0.5 },
+  soldBadge: { position: 'absolute', backgroundColor: COLORS.danger, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4 },
+  soldText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  prodInfo: { marginBottom: 10 },
+  prodName: { fontSize: 14, fontWeight: '700', color: COLORS.dark, lineHeight: 18, marginBottom: 4 },
+  prodPrice: { fontSize: 15, fontWeight: 'bold', color: COLORS.primary },
+  addBtn: { position: 'absolute', bottom: 10, right: 10, backgroundColor: COLORS.dark, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
 
-  // CART & MODALS
-  cartListContainer: { flex: 1 },
-  cartRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 12, backgroundColor: '#F9FAFB', padding: 8, borderRadius: 10 },
-  qtyControlContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, borderRadius: 8, borderWidth: 1, borderColor: '#E5E7EB', marginRight: 10 },
-  qtyBtnSmall: { padding: 8 },
-  qtyBadge: { width: 24, alignItems: 'center', justifyContent: 'center' },
-  qtyText: { color: COLORS.dark, fontSize: 14, fontWeight: 'bold' },
-  cartDetails: { flex: 1 },
-  cartName: { fontSize: 13, fontWeight: '600', color: COLORS.dark },
-  cartPrice: { fontSize: 13, color: COLORS.primary, fontWeight: '700' },
-  trashBtn: { padding: 5 },
+  // FLOATING BAR
+  floatBarContainer: { position: 'absolute', bottom: 30, left: 20, right: 20 },
+  floatBar: { backgroundColor: COLORS.dark, borderRadius: 20, padding: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', ...COLORS.cardShadow },
+  badge: { backgroundColor: COLORS.primary, width: 28, height: 28, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  badgeText: { color: '#fff', fontWeight: 'bold' },
+  viewOrderText: { color: '#fff', fontSize: 16, fontWeight: 'bold', flex: 1 },
+  floatTotal: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
 
-  bottomBarContainer: { position: 'absolute', bottom: 20, left: 20, right: 20, elevation: 10, zIndex: 999 },
-  bottomBar: { backgroundColor: COLORS.dark, borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8 },
-  badgeContainer: { backgroundColor: COLORS.primary, borderRadius: 12, width: 24, height: 24, alignItems: 'center', justifyContent: 'center' },
-  viewCartText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  bottomBarTotal: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  checkoutSection: { borderTopWidth: 1, borderTopColor: '#F3F4F6', paddingTop: 15 },
-  totalRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 15 },
-  totalLabel: { fontSize: 14, fontWeight: '600', color: COLORS.gray },
-  totalValue: { fontSize: 22, fontWeight: 'bold', color: COLORS.dark },
-  checkoutBtn: { backgroundColor: COLORS.primary, paddingVertical: 16, borderRadius: 12, alignItems: 'center', ...COLORS.cardShadow },
-  disabledBtn: { backgroundColor: '#C7D2FE' },
-  checkoutText: { color: COLORS.white, fontSize: 16, fontWeight: 'bold' },
-  cartHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  clearText: { color: COLORS.danger, fontWeight: 'bold' },
-  mobileModalContainer: { flex: 1, backgroundColor: '#F8F9FA' },
-  mobileModalHeader: { padding: 20, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#E5E7EB', backgroundColor: '#fff' },
-  mobileModalTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.dark },
-  closeModalBtn: { padding: 5 },
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
-  receiptContainer: { width: '85%', maxWidth: 400, borderRadius: 20, overflow: 'hidden', backgroundColor: '#fff' },
-  receiptHeader: { backgroundColor: COLORS.success, padding: 20, alignItems: 'center', justifyContent: 'center' },
-  receiptHeaderTitle: { color: '#fff', fontWeight: 'bold', fontSize: 18, marginTop: 10 },
-  receiptBody: { padding: 25 },
-  receiptStore: { fontSize: 20, fontWeight: 'bold', color: COLORS.dark, textAlign: 'center' },
-  receiptTime: { fontSize: 12, color: COLORS.gray, textAlign: 'center', marginBottom: 20, marginTop: 5 },
-  divider: { width: '100%', height: 1, backgroundColor: '#E5E7EB', marginVertical: 15 },
-  receiptList: { maxHeight: 150 },
-  receiptItemRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  recItemText: { fontSize: 14, color: COLORS.dark, flex: 1 },
-  recItemPrice: { fontSize: 14, fontWeight: 'bold', color: COLORS.dark },
-  receiptTotalRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
-  recTotalLabel: { fontSize: 16, fontWeight: 'bold', color: COLORS.dark },
-  recTotalValue: { fontSize: 22, fontWeight: 'bold', color: COLORS.success },
-  receiptActions: { marginTop: 25, gap: 10 },
-  printBtn: { backgroundColor: COLORS.print, padding: 15, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  printBtnText: { color: '#fff', fontWeight: 'bold' },
-  newSaleBtn: { backgroundColor: '#F3F4F6', padding: 15, borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  newSaleText: { color: COLORS.dark, fontWeight: 'bold' },
-  emptyState: { alignItems: 'center', marginTop: 40 },
-  emptyStateText: { color: COLORS.gray, marginTop: 10, fontSize: 12 },
+  // CART MODAL
+  modalContainer: { flex: 1, backgroundColor: '#F9FAFB' },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 25, backgroundColor: '#fff' },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.dark },
+  cartRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#fff', padding: 15, marginBottom: 10, borderRadius: 12, marginHorizontal: 20 },
+  cartItemName: { fontSize: 16, fontWeight: 'bold', color: COLORS.dark },
+  cartItemPrice: { color: COLORS.gray, marginTop: 4 },
+  qtyControls: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F3F4F6', borderRadius: 8 },
+  qtyBtn: { padding: 10 },
+  qtyNum: { fontWeight: 'bold', fontSize: 16, width: 20, textAlign: 'center' },
+  checkoutArea: { padding: 25, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#E5E7EB' },
+  totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  totalLabel: { fontSize: 16, color: COLORS.gray },
+  totalBig: { fontSize: 28, fontWeight: 'bold', color: COLORS.dark },
+  checkoutBtn: { backgroundColor: COLORS.primary, padding: 18, borderRadius: 16, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 10 },
+  checkoutText: { color: '#fff', fontSize: 16, fontWeight: 'bold', letterSpacing: 1 },
+
+  // RECEIPT MODAL
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  receiptCard: { backgroundColor: '#fff', width: '100%', maxWidth: 350, borderRadius: 24, padding: 30, alignItems: 'center' },
+  successIcon: { width: 70, height: 70, borderRadius: 35, backgroundColor: COLORS.success, justifyContent: 'center', alignItems: 'center', marginBottom: 20 },
+  successTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.dark, marginBottom: 5 },
+  successSub: { fontSize: 16, color: COLORS.gray, marginBottom: 25 },
+  receiptActions: { flexDirection: 'row', gap: 10, width: '100%' },
+  actionBtn: { flex: 1, padding: 15, borderRadius: 12, justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: 8 },
 });

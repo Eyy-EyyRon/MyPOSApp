@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "MyPOSApp",
+    "name": "POS",
     "slug": "MyPOSApp",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,7 +8,7 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/splash-icon.png",
+      "image": "./assets/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -31,7 +31,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "0e448569-bb86-455a-90b5-a39adda3af34"
+        "projectId": "6f870ea4-47b6-4767-8b67-312925782761"
       }
     }
   }
