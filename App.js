@@ -5,6 +5,7 @@ import {
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
+import LottieView from 'lottie-react-native'; 
 
 // --- SCREENS ---
 import AuthScreen from './src/screens/AuthScreen';
@@ -17,7 +18,7 @@ import OwnerScreen from './src/screens/OwnerScreen';
 import { supabase } from './src/lib/supabase';
 
 const Tab = createBottomTabNavigator();
-const COLORS = { primary: '#130f5f', dark: '#111827', success: '#10B981', white: '#FFF' };
+const COLORS = { primary: '#130f5f', dark: '#111827', success: '#10B981', white: '#FFF', danger: '#EF4444' };
 
 // --- CUSTOM NOTIFICATION COMPONENT ---
 const NotificationBanner = ({ message, visible, onClose }) => {
@@ -25,27 +26,14 @@ const NotificationBanner = ({ message, visible, onClose }) => {
 
   useEffect(() => {
     if (visible) {
-      // Slide Down
-      Animated.timing(slideAnim, {
-        toValue: 0,
-        duration: 300,
-        useNativeDriver: true,
-      }).start();
-
-      // Auto Hide after 4 seconds
-      const timer = setTimeout(() => {
-        closeBanner();
-      }, 4000);
+      Animated.timing(slideAnim, { toValue: 0, duration: 300, useNativeDriver: true }).start();
+      const timer = setTimeout(() => closeBanner(), 4000);
       return () => clearTimeout(timer);
     }
   }, [visible]);
 
   const closeBanner = () => {
-    Animated.timing(slideAnim, {
-      toValue: -150,
-      duration: 300,
-      useNativeDriver: true,
-    }).start(() => onClose());
+    Animated.timing(slideAnim, { toValue: -150, duration: 300, useNativeDriver: true }).start(() => onClose());
   };
 
   if (!visible) return null;
@@ -54,9 +42,7 @@ const NotificationBanner = ({ message, visible, onClose }) => {
     <Animated.View style={[styles.notificationWrapper, { transform: [{ translateY: slideAnim }] }]}>
       <SafeAreaView>
         <TouchableOpacity style={styles.notificationContent} onPress={closeBanner} activeOpacity={0.9}>
-          <View style={styles.iconCircle}>
-            <Ionicons name="cash" size={24} color={COLORS.success} />
-          </View>
+          <View style={styles.iconCircle}><Ionicons name="cash" size={24} color={COLORS.success} /></View>
           <View style={{flex: 1}}>
             <Text style={styles.notifTitle}>New Sale! 💰</Text>
             <Text style={styles.notifBody}>{message}</Text>
@@ -71,82 +57,94 @@ const NotificationBanner = ({ message, visible, onClose }) => {
 export default function App() {
   const [session, setSession] = useState(null);
   const [userRole, setUserRole] = useState(null);
-  const [appIsReady, setAppIsReady] = useState(false); 
   
+  // 🎬 INITIAL LOAD STATE (True only for the very first cold start)
+  const [appIsReady, setAppIsReady] = useState(false);
+  const [isAnimationFinished, setIsAnimationFinished] = useState(false);
+  const [profileError, setProfileError] = useState(false);
+
   // Notification State
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMessage, setNotifMessage] = useState("");
 
   useEffect(() => {
-    // 1. LISTEN FOR AUTH CHANGES
+    // 1. Initial Session Check (Cold Start)
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
-      if (session) fetchUserRole(session.user.id);
-      else setAppIsReady(true);
-    });
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
       if (session) {
-        setAppIsReady(false);
-        fetchUserRole(session.user.id);
+        fetchUserRole(session.user.id); // Fetch data, but keep Splash active until done
       } else {
-        setUserRole(null);
-        setAppIsReady(true);
+        setAppIsReady(true); // No user? Ready to show Auth Screen
       }
     });
 
-    return () => {
-      authListener.subscription.unsubscribe();
-    };
+    // 2. Listen for Auth Changes (Login / Logout)
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+      
+      if (session) {
+        // ⚠️ FIX: Do NOT set appIsReady(false) here. 
+        // This prevents the Splash Screen from showing up again during login.
+        setProfileError(false);
+        fetchUserRole(session.user.id);
+      } else {
+        // Logout
+        setUserRole(null);
+        setAppIsReady(true); // Ensure Auth screen shows
+      }
+    });
+
+    return () => { authListener.subscription.unsubscribe(); };
   }, []);
 
-  // --- 2. REAL-TIME LISTENER FOR SALES ---
   useEffect(() => {
-    // Only listen if user is a MANAGER and has notifications ON
     if (!userRole || userRole.role !== 'manager' || userRole.notifications_enabled === false) return;
-
-    console.log("🔔 Listening for sales at:", userRole.store_name);
 
     const subscription = supabase
       .channel('public:sales')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sales' }, (payload) => {
-        
-        // Check if the sale belongs to THIS manager's store
         if (payload.new.store_name === userRole.store_name) {
-          triggerInAppNotification(
-            `Received ₱${payload.new.total_amount} from ${payload.new.cashier_name}`
-          );
+          triggerInAppNotification(`Received ₱${payload.new.total_amount} from ${payload.new.cashier_name}`);
         }
       })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(subscription);
-    };
+    return () => { supabase.removeChannel(subscription); };
   }, [userRole]); 
 
-  // --- HELPER: SHOW BANNER ---
   const triggerInAppNotification = (message) => {
     setNotifMessage(message);
     setNotifVisible(true);
   };
 
-  const fetchUserRole = async (userId) => {
+  const fetchUserRole = async (userId, retries = 3) => {
     try {
-      console.log("App.js: Fetching Profile...");
+      console.log(`Fetching profile for: ${userId}`);
+      
       const { data, error } = await supabase
         .from('profiles')
         .select('*') 
         .eq('id', userId)
         .single();
       
+      if (error) {
+        if (error.code === 'PGRST116' && retries > 0) {
+          // Retry logic (silent, doesn't trigger splash)
+          setTimeout(() => fetchUserRole(userId, retries - 1), 1000);
+          return;
+        }
+        throw error;
+      }
+
       if (data) {
         setUserRole(data);
+        setProfileError(false);
       }
     } catch (e) {
-      console.log("App.js: Fetch Exception", e);
+      console.log("Fetch Failed:", e.message);
+      if (retries === 0) setProfileError(true);
     } finally {
+      // Mark app as ready (removes splash screen if it was the first load)
       setAppIsReady(true);
     }
   };
@@ -155,21 +153,54 @@ export default function App() {
     if (session?.user?.id) fetchUserRole(session.user.id);
   };
 
-  // --- RENDER LOGIC ---
-  if (!appIsReady) {
+  // 🎬 SPLASH SCREEN (Only shows on Cold Start)
+  if (!appIsReady || !isAnimationFinished) {
     return (
       <View style={styles.splashContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
+        <LottieView
+          source={require('./assets/splash.json')} 
+          autoPlay loop={false} resizeMode="cover"
+          onAnimationFinish={() => setIsAnimationFinished(true)}
+          style={{ width: '100%', height: '100%' }}
+        />
       </View>
     );
   }
 
-  // --- MAIN APP CONTENT ---
+  // 🚨 ERROR STATE
+  if (profileError && session) {
+    return (
+      <View style={styles.errorContainer}>
+        <Ionicons name="alert-circle" size={64} color={COLORS.danger} />
+        <Text style={styles.errorTitle}>Profile Not Found</Text>
+        <Text style={styles.errorText}>
+          We found your login, but your user profile is missing.
+        </Text>
+        <TouchableOpacity style={styles.retryBtn} onPress={() => fetchUserRole(session.user.id, 5)}>
+          <Text style={styles.retryText}>Retry Loading</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.logoutBtn} onPress={() => supabase.auth.signOut()}>
+          <Text style={styles.logoutText}>Sign Out</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // --- MAIN CONTENT ---
   const renderContent = () => {
     if (!session) return <AuthScreen />;
-    if (userRole?.status === 'banned') return <AuthScreen isBanned={true} />; 
-    if (userRole?.must_change_password) return <ChangePasswordScreen onPasswordChanged={handlePasswordUpdateComplete} />;
-    if (!userRole) return <View style={styles.splashContainer}><ActivityIndicator size="large" color="red" /></View>;
+    
+    // ⏳ LOADING STATE (Shows Spinner instead of Splash during login)
+    if (!userRole) {
+      return (
+        <View style={styles.splashContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+        </View>
+      );
+    }
+
+    if (userRole.status === 'banned') return <AuthScreen isBanned={true} />; 
+    if (userRole.must_change_password) return <ChangePasswordScreen onPasswordChanged={handlePasswordUpdateComplete} />;
 
     const isOwner = userRole?.role === 'owner';
     const isManager = userRole?.role === 'manager';
@@ -179,6 +210,17 @@ export default function App() {
         <Tab.Navigator
           screenOptions={({ route }) => ({
             headerShown: false,
+            tabBarStyle: { 
+              height: Platform.OS === 'android' ? 100 : 95, 
+              paddingBottom: Platform.OS === 'android' ? 40 : 35, 
+              paddingTop: 12,
+              backgroundColor: '#ffffff',
+              borderTopWidth: 0,
+              elevation: 20,
+              shadowColor: '#000', shadowOffset: { width: 0, height: -5 },
+              shadowOpacity: 0.1, shadowRadius: 10,
+              borderTopLeftRadius: 20, borderTopRightRadius: 20,
+            },
             tabBarIcon: ({ focused, color, size }) => {
               let iconName;
               if (route.name === 'POS') iconName = focused ? 'calculator' : 'calculator-outline';
@@ -189,8 +231,8 @@ export default function App() {
               return <Ionicons name={iconName} size={size} color={color} />;
             },
             tabBarActiveTintColor: COLORS.primary,
-            tabBarInactiveTintColor: 'gray',
-            tabBarStyle: { paddingBottom: 5, height: 60 },
+            tabBarInactiveTintColor: '#9CA3AF',
+            tabBarLabelStyle: { fontSize: 11, fontWeight: '600', marginTop: -5 }
           })}
         >
           {isOwner ? (
@@ -221,56 +263,32 @@ export default function App() {
   return (
     <View style={{ flex: 1 }}>
       {renderContent()}
-      
-      {/* GLOBAL NOTIFICATION COMPONENT */}
-      <NotificationBanner 
-        visible={notifVisible} 
-        message={notifMessage} 
-        onClose={() => setNotifVisible(false)} 
-      />
+      <NotificationBanner visible={notifVisible} message={notifMessage} onClose={() => setNotifVisible(false)} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   splashContainer: { flex: 1, backgroundColor: '#ffffff', alignItems: 'center', justifyContent: 'center' },
-  
-  // Notification Styles
   notificationWrapper: {
-    position: 'absolute',
-    top: 0, left: 0, right: 0,
-    zIndex: 9999, // Stays on top of everything
-    paddingTop: Platform.OS === 'android' ? 40 : 0, // Handle notch
+    position: 'absolute', top: 0, left: 0, right: 0,
+    zIndex: 9999, paddingTop: Platform.OS === 'android' ? 40 : 0,
   },
   notificationContent: {
-    margin: 15,
-    backgroundColor: 'white',
-    borderRadius: 16,
-    padding: 15,
-    flexDirection: 'row',
-    alignItems: 'center',
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 10,
-    elevation: 10,
-    borderLeftWidth: 5,
-    borderLeftColor: COLORS.success
+    margin: 15, backgroundColor: 'white', borderRadius: 16, padding: 15,
+    flexDirection: 'row', alignItems: 'center',
+    shadowColor: "#000", shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15, shadowRadius: 10, elevation: 10,
+    borderLeftWidth: 5, borderLeftColor: COLORS.success
   },
-  iconCircle: {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: '#DEF7EC',
-    justifyContent: 'center', alignItems: 'center',
-    marginRight: 15
-  },
-  notifTitle: {
-    fontWeight: 'bold',
-    fontSize: 16,
-    color: COLORS.dark,
-    marginBottom: 2
-  },
-  notifBody: {
-    color: '#555',
-    fontSize: 14
-  }
+  iconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#DEF7EC', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  notifTitle: { fontWeight: 'bold', fontSize: 16, color: COLORS.dark, marginBottom: 2 },
+  notifBody: { color: '#555', fontSize: 14 },
+  errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: '#FFF' },
+  errorTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.dark, marginTop: 20 },
+  errorText: { fontSize: 15, color: '#666', textAlign: 'center', marginVertical: 15, lineHeight: 22 },
+  retryBtn: { marginTop: 20, backgroundColor: COLORS.primary, paddingHorizontal: 40, paddingVertical: 14, borderRadius: 12, width: '100%', alignItems: 'center' },
+  retryText: { color: '#FFF', fontWeight: 'bold', fontSize: 16 },
+  logoutBtn: { marginTop: 15, paddingVertical: 12, width: '100%', alignItems: 'center' },
+  logoutText: { color: COLORS.danger, fontWeight: 'bold', fontSize: 16 }
 });

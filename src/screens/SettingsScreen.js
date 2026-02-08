@@ -1,23 +1,64 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, Alert, Image, Switch, 
   ActivityIndicator, SafeAreaView, Platform, Modal, TextInput, 
-  KeyboardAvoidingView, ScrollView // <--- Added ScrollView
+  KeyboardAvoidingView, ScrollView, Animated
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as ImagePicker from 'expo-image-picker';
 import { supabase } from '../lib/supabase';
+import * as Haptics from 'expo-haptics'; 
 
 // --- THEME ---
 const COLORS = {
-  primary: '#130f5f',
-  dark: '#111827',
-  white: '#FFFFFF',
-  gray: '#9CA3AF',
-  lightGray: '#F3F4F6',
-  danger: '#f31111',
+  primary: '#130f5f', dark: '#111827', white: '#FFFFFF',
+  gray: '#9CA3AF', lightGray: '#F3F4F6', danger: '#f31111',
   success: '#10B981',
+  cardShadow: { shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.05, shadowRadius: 10, elevation: 3 }
+};
+
+// ✨ FANCY ALERT COMPONENT
+const CustomAlert = ({ visible, title, message, onCancel, onConfirm, type = 'danger' }) => {
+  const scaleAnim = useRef(new Animated.Value(0)).current;
+  const opacityAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (visible) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+      Animated.parallel([
+        Animated.spring(scaleAnim, { toValue: 1, friction: 5, tension: 40, useNativeDriver: true }),
+        Animated.timing(opacityAnim, { toValue: 1, duration: 200, useNativeDriver: true })
+      ]).start();
+    } else {
+      scaleAnim.setValue(0);
+      opacityAnim.setValue(0);
+    }
+  }, [visible]);
+
+  if (!visible) return null;
+
+  return (
+    <Modal transparent visible={visible} animationType="none">
+      <View style={styles.alertOverlay}>
+        <Animated.View style={[styles.alertContainer, { transform: [{ scale: scaleAnim }], opacity: opacityAnim }]}>
+          <View style={[styles.alertIconCircle, { backgroundColor: type === 'danger' ? '#FEF2F2' : '#EFF6FF' }]}>
+            <Ionicons name={type === 'danger' ? "log-out" : "information-circle"} size={32} color={type === 'danger' ? COLORS.danger : COLORS.primary} />
+          </View>
+          <Text style={styles.alertTitle}>{title}</Text>
+          <Text style={styles.alertMessage}>{message}</Text>
+          <View style={styles.alertBtnRow}>
+            <TouchableOpacity style={styles.alertBtnCancel} onPress={onCancel}>
+              <Text style={styles.alertBtnCancelText}>Cancel</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.alertBtnConfirm, { backgroundColor: type === 'danger' ? COLORS.danger : COLORS.primary }]} onPress={onConfirm}>
+              <Text style={styles.alertBtnConfirmText}>{type === 'danger' ? "Sign Out" : "Confirm"}</Text>
+            </TouchableOpacity>
+          </View>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
 };
 
 export default function SettingsScreen() {
@@ -28,6 +69,7 @@ export default function SettingsScreen() {
   // --- MODAL STATES ---
   const [editProfileVisible, setEditProfileVisible] = useState(false);
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [logoutAlertVisible, setLogoutAlertVisible] = useState(false); 
   
   // --- FORM STATES ---
   const [firstName, setFirstName] = useState('');
@@ -38,25 +80,35 @@ export default function SettingsScreen() {
 
   // --- 1. LOAD PROFILE ---
   useFocusEffect(
-    useCallback(() => {
-      fetchProfile();
-    }, [])
+    useCallback(() => { fetchProfile(); }, [])
   );
 
   const fetchProfile = async () => {
-    setLoading(true);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const { data } = await supabase
+    try {
+      setLoading(true);
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (!user) {
+        console.log("No authenticated user found.");
+        return;
+      }
+
+      const { data, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', user.id)
         .single();
-      setProfile(data);
-      setFirstName(data?.first_name || '');
-      setLastName(data?.last_name || '');
+
+      if (data) {
+        setProfile(data);
+        setFirstName(data.first_name || '');
+        setLastName(data.last_name || '');
+      }
+    } catch (e) {
+      console.log("Unexpected error:", e);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   // --- 2. ACTIONS ---
@@ -67,95 +119,110 @@ export default function SettingsScreen() {
       const { error } = await supabase
         .from('profiles')
         .update({ first_name: firstName, last_name: lastName })
-        .eq('id', profile.id);
+        .eq('id', profile?.id);
 
       if (error) throw error;
       
-      setProfile({ ...profile, first_name: firstName, last_name: lastName });
+      setProfile(prev => ({ ...prev, first_name: firstName, last_name: lastName }));
       setEditProfileVisible(false);
-      Alert.alert("Success", "Profile updated successfully!");
-    } catch (err) {
-      Alert.alert("Error", err.message);
-    } finally {
-      setSaving(false);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (err) { 
+      Alert.alert("Error", err.message); 
+    } finally { 
+      setSaving(false); 
     }
   };
 
   const handleChangePassword = async () => {
     if (newPassword.length < 6) return Alert.alert("Weak Password", "Must be at least 6 characters.");
     if (newPassword !== confirmPassword) return Alert.alert("Mismatch", "Passwords do not match.");
-    
     setSaving(true);
     try {
       const { error } = await supabase.auth.updateUser({ password: newPassword });
       if (error) throw error;
-      
-      setPasswordVisible(false);
-      setNewPassword('');
-      setConfirmPassword('');
+      setPasswordVisible(false); setNewPassword(''); setConfirmPassword('');
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert("Success", "Password changed successfully!");
-    } catch (err) {
-      Alert.alert("Error", err.message);
-    } finally {
-      setSaving(false);
-    }
+    } catch (err) { Alert.alert("Error", err.message); } 
+    finally { setSaving(false); }
   };
 
   const toggleNotifications = async (value) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setProfile(prev => ({ ...prev, notifications_enabled: value }));
-    try {
-      await supabase
-        .from('profiles')
-        .update({ notifications_enabled: value })
-        .eq('id', profile.id);
-    } catch (error) {
-      console.log("Failed to save preference", error);
-      setProfile(prev => ({ ...prev, notifications_enabled: !value }));
+    if (profile?.id) {
+        try {
+          await supabase.from('profiles').update({ notifications_enabled: value }).eq('id', profile.id);
+        } catch (error) {
+          console.log(error);
+        }
     }
   };
 
+  // --- 📸 AVATAR UPLOAD (FIXED) ---
   const pickImage = async () => {
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') return Alert.alert("Permission Denied", "We need access to photos.");
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') return Alert.alert("Permission Denied", "We need access to photos.");
 
-    let result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [1, 1], quality: 0.5,
-    });
+      let result = await ImagePicker.launchImageLibraryAsync({
+        // 🛑 FIXED: Reverted to MediaTypeOptions to prevent crash
+        mediaTypes: ImagePicker.MediaTypeOptions.Images, 
+        allowsEditing: true, 
+        aspect: [1, 1], 
+        quality: 0.5,
+      });
 
-    if (!result.canceled) uploadAvatar(result.assets[0].uri);
+      if (!result.canceled && result.assets && result.assets.length > 0) {
+        uploadAvatar(result.assets[0].uri);
+      }
+    } catch (e) {
+      console.log("Picker Error", e);
+    }
   };
 
   const uploadAvatar = async (uri) => {
+    if (!profile?.id) return;
     try {
       setUploading(true);
-      const fileExt = uri.split('.').pop();
-      const fileName = `${profile.id}-${Date.now()}.${fileExt}`;
-      const formData = new FormData();
-      formData.append('file', { uri, name: fileName, type: `image/${fileExt}` });
 
-      const { error: uploadError } = await supabase.storage.from('avatars').upload(fileName, formData, { contentType: `image/${fileExt}` });
+      // 1. Get file extension
+      const fileExt = uri.split('.').pop().toLowerCase();
+      const fileName = `${profile.id}-${Date.now()}.${fileExt}`;
+      const filePath = `${fileName}`;
+
+      // 2. ⚡️ MODERN UPLOAD (Fetch instead of FileSystem)
+      // This is faster and doesn't require the deprecated readAsStringAsync
+      const response = await fetch(uri);
+      const arrayBuffer = await response.arrayBuffer();
+
+      // 3. Upload to Supabase
+      const { error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(filePath, arrayBuffer, { 
+            contentType: `image/${fileExt === 'jpg' ? 'jpeg' : fileExt}`, 
+            upsert: true 
+        });
+
       if (uploadError) throw uploadError;
 
-      const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(fileName);
+      // 4. Get Public URL
+      const { data: { publicUrl } } = supabase.storage.from('avatars').getPublicUrl(filePath);
       
+      // 5. Update Profile
       await supabase.from('profiles').update({ avatar_url: publicUrl }).eq('id', profile.id);
       
-      // Force UI refresh with new timestamp
-      setProfile({ ...profile, avatar_url: `${publicUrl}?t=${new Date().getTime()}` });
-      
-      Alert.alert("Success", "Profile picture updated!");
+      setProfile(prev => ({ ...prev, avatar_url: `${publicUrl}?t=${Date.now()}` })); 
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch (error) {
-      Alert.alert("Upload Failed", error.message);
-    } finally {
-      setUploading(false);
-    }
+      Alert.alert("Upload Failed", error.message || "Check your internet connection.");
+      console.error(error);
+    } finally { setUploading(false); }
   };
 
-  const handleLogout = () => {
-    Alert.alert("Sign Out", "Are you sure?", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Sign Out", style: "destructive", onPress: () => supabase.auth.signOut() }
-    ]);
+  const handleLogoutConfirm = () => {
+    setLogoutAlertVisible(false);
+    supabase.auth.signOut();
   };
 
   if (loading && !profile) return <View style={styles.center}><ActivityIndicator size="large" color={COLORS.primary} /></View>;
@@ -166,7 +233,6 @@ export default function SettingsScreen() {
         <Text style={styles.headerTitle}>Settings</Text>
       </View>
 
-      {/* ✅ Changed View to ScrollView so Logout button is reachable */}
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
         
         {/* PROFILE CARD */}
@@ -176,16 +242,22 @@ export default function SettingsScreen() {
               <Image source={{ uri: profile.avatar_url }} style={styles.avatar} />
             ) : (
               <View style={[styles.avatar, styles.placeholderAvatar]}>
-                <Text style={styles.initials}>{profile?.first_name?.[0]?.toUpperCase() || "U"}</Text>
+                <Text style={styles.initials}>
+                  {profile?.first_name ? profile.first_name[0].toUpperCase() : "U"}
+                </Text>
               </View>
             )}
             <TouchableOpacity style={styles.editBadge} onPress={pickImage} disabled={uploading}>
-              {uploading ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="camera" size={16} color="#fff" />}
+              {uploading ? <ActivityIndicator size="small" color="#fff" /> : <Ionicons name="camera" size={14} color="#fff" />}
             </TouchableOpacity>
           </View>
           <View style={styles.profileInfo}>
-            <Text style={styles.name}>{profile?.first_name} {profile?.last_name}</Text>
-            <Text style={styles.role}>{profile?.role?.toUpperCase()} • {profile?.store_name || "No Store"}</Text>
+            <Text style={styles.name}>
+              {profile ? `${profile.first_name} ${profile.last_name}` : "User"}
+            </Text>
+            <Text style={styles.role}>
+              {profile?.role ? profile.role.toUpperCase() : "MEMBER"} • {profile?.store_name || "No Store"}
+            </Text>
             <View style={styles.statusBadge}><View style={styles.statusDot} /><Text style={styles.statusText}>Active</Text></View>
           </View>
         </View>
@@ -229,15 +301,23 @@ export default function SettingsScreen() {
         </View>
 
         {/* LOGOUT BUTTON */}
-        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
+        <TouchableOpacity style={styles.logoutBtn} onPress={() => setLogoutAlertVisible(true)}>
           <Ionicons name="log-out-outline" size={20} color={COLORS.danger} />
           <Text style={styles.logoutText}>Sign Out</Text>
         </TouchableOpacity>
 
-        {/* Extra padding at bottom to ensure scrolling covers button */}
         <View style={{ height: 40 }} />
-
       </ScrollView>
+
+      {/* ✨ FANCY LOGOUT ALERT */}
+      <CustomAlert 
+        visible={logoutAlertVisible} 
+        title="Sign Out?" 
+        message="Are you sure you want to sign out of your account?" 
+        onCancel={() => setLogoutAlertVisible(false)}
+        onConfirm={handleLogoutConfirm}
+        type="danger"
+      />
 
       {/* --- EDIT PROFILE MODAL --- */}
       <Modal visible={editProfileVisible} animationType="slide" transparent>
@@ -289,12 +369,12 @@ const styles = StyleSheet.create({
   content: { padding: 20 },
   
   // PROFILE CARD
-  profileCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, padding: 20, borderRadius: 20, marginBottom: 25, shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.05, shadowRadius: 10, elevation: 3 },
+  profileCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, padding: 20, borderRadius: 20, marginBottom: 25, ...COLORS.cardShadow },
   avatarContainer: { position: 'relative', marginRight: 15 },
   avatar: { width: 70, height: 70, borderRadius: 35 },
   placeholderAvatar: { backgroundColor: '#EEF2FF', justifyContent: 'center', alignItems: 'center' },
   initials: { fontSize: 28, fontWeight: 'bold', color: COLORS.primary },
-  editBadge: { position: 'absolute', bottom: 0, right: 0, backgroundColor: COLORS.primary, width: 24, height: 24, borderRadius: 12, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#fff' },
+  editBadge: { position: 'absolute', bottom: 0, right: 0, backgroundColor: COLORS.primary, width: 26, height: 26, borderRadius: 13, justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#fff' },
   profileInfo: { flex: 1 },
   name: { fontSize: 18, fontWeight: 'bold', color: COLORS.dark },
   role: { fontSize: 12, color: COLORS.gray, marginTop: 2, fontWeight: '600' },
@@ -316,11 +396,23 @@ const styles = StyleSheet.create({
   
   // MODAL STYLES
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
-  modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, minHeight: 300 },
+  modalContent: { backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, minHeight: 350 },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
-  modalTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.dark },
+  modalTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.dark },
   label: { fontSize: 12, fontWeight: 'bold', color: COLORS.gray, marginBottom: 5, marginTop: 10 },
-  input: { backgroundColor: '#F3F4F6', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: '#E5E7EB', color: COLORS.dark },
+  input: { backgroundColor: '#F9FAFB', padding: 15, borderRadius: 12, borderWidth: 1, borderColor: '#E5E7EB', color: COLORS.dark, fontSize: 16 },
   saveBtn: { backgroundColor: COLORS.primary, padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 30 },
-  saveBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 }
+  saveBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+
+  // ✨ FANCY ALERT STYLES
+  alertOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  alertContainer: { backgroundColor: '#fff', width: '100%', maxWidth: 320, borderRadius: 24, padding: 24, alignItems: 'center', ...COLORS.cardShadow },
+  alertIconCircle: { width: 60, height: 60, borderRadius: 30, justifyContent: 'center', alignItems: 'center', marginBottom: 16 },
+  alertTitle: { fontSize: 20, fontWeight: 'bold', color: COLORS.dark, marginBottom: 8, textAlign: 'center' },
+  alertMessage: { fontSize: 14, color: COLORS.gray, textAlign: 'center', marginBottom: 24, lineHeight: 20 },
+  alertBtnRow: { flexDirection: 'row', gap: 12, width: '100%' },
+  alertBtnCancel: { flex: 1, paddingVertical: 12, borderRadius: 12, backgroundColor: COLORS.lightGray, alignItems: 'center' },
+  alertBtnCancelText: { fontWeight: 'bold', color: COLORS.gray },
+  alertBtnConfirm: { flex: 1, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
+  alertBtnConfirmText: { fontWeight: 'bold', color: '#fff' },
 });

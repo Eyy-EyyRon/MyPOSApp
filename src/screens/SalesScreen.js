@@ -10,8 +10,8 @@ import { supabase } from '../lib/supabase';
 
 // --- THEME ---
 const COLORS = {
-  primary: '#4F46E5',    
-  success: '#10B981',    
+  primary: '#0b074d',    
+  success: '#1eb910',    
   bg: '#F9FAFB',         
   white: '#FFFFFF',
   text: '#111827',       

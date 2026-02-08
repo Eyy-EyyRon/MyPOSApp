@@ -12,7 +12,7 @@ const COLORS = {
   dark: '#111827',       
   bg: '#F9FAFB',         
   white: '#FFFFFF',
-  gray: '#9CA3AF',
+  gray: '#6B7280', // Made slightly darker for better visibility
   inputBg: '#F3F4F6',
   borderColor: '#E5E7EB',
   danger: '#EF4444',
@@ -32,7 +32,7 @@ const InputField = ({ icon, placeholder, value, onChange, secure = false, autoCa
     <TextInput 
       style={styles.input} 
       placeholder={placeholder}
-      placeholderTextColor={COLORS.gray}
+      placeholderTextColor={COLORS.gray} 
       value={value} 
       onChangeText={onChange} 
       secureTextEntry={secure}
@@ -53,7 +53,7 @@ export default function AuthScreen({ isBanned, forcePasswordChange }) {
   const [firstName, setFirstName] = useState('');
   const [storeName, setStoreName] = useState('');
 
-  // Password Change State (Handled by App.js mostly, but UI here for fallback)
+  // Password Change State
   const [showForceChange, setShowForceChange] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -68,20 +68,28 @@ export default function AuthScreen({ isBanned, forcePasswordChange }) {
 
     try {
       if (isLogin) {
+        // --- LOGIN LOGIC ---
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
       } else {
+        // --- REGISTRATION LOGIC ---
         if (!firstName || !storeName) {
            setLoading(false);
            return Alert.alert("Missing Fields", "Name and Store Name are required.");
         }
+        
         const { error } = await supabase.auth.signUp({
           email, password,
           options: { data: { first_name: firstName, store_name: storeName, role: 'manager' } },
         });
+        
         if (error) throw error;
+
+        // 🛑 CRITICAL FIX: Immediately Sign Out to prevent auto-login crash
+        await supabase.auth.signOut();
+
         Alert.alert("Success", "Account created! You can now log in.");
-        setIsLogin(true); 
+        setIsLogin(true); // Switch back to Login view
       }
     } catch (error) {
       Alert.alert("Authentication Failed", error.message);
@@ -199,7 +207,8 @@ export default function AuthScreen({ isBanned, forcePasswordChange }) {
 
           {!isLogin && (
             <>
-              <InputField icon="person-outline" placeholder="First Name" value={firstName} onChange={setFirstName} autoCap="words" />
+              {/* FIXED: Ensure placeholder is explicitly passed */}
+              <InputField icon="person-outline" placeholder="Full Name" value={firstName} onChange={setFirstName} autoCap="words" />
               <View style={{height: 15}} />
               <InputField icon="business-outline" placeholder="Store Name" value={storeName} onChange={setStoreName} autoCap="words" />
               <View style={{height: 15}} />
