@@ -1,21 +1,30 @@
 import { createClient } from '@supabase/supabase-js'
 
-// We need your URL and Key again here to create a temporary client
+// Your Project Credentials (ensure these are correct)
 const supabaseUrl = 'https://nsbildrqcosormutvukw.supabase.co'
 const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5zYmlsZHJxY29zb3JtdXR2dWt3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk3OTEzOTAsImV4cCI6MjA4NTM2NzM5MH0.oQ_deYP8YzyZ0QPuV7zxPwekwDkwoFu4kKlkFFv2IAo'
 
+// 🛡️ CUSTOM DUMMY STORAGE
+// This prevents the temp client from overwriting the Manager's session in AsyncStorage
+const InMemoryStorage = {
+  getItem: (key) => null,
+  setItem: (key, value) => null,
+  removeItem: (key) => null,
+};
+
 export const createMerchantAccount = async (email, password, firstName, lastName, storeName, managerId) => {
   
-  // 1. Create a temporary client just for this action
-  // FIXED: Used 'supabaseAnonKey' correctly here
+  // 1. Create a strictly isolated client
   const tempClient = createClient(supabaseUrl, supabaseAnonKey, {
     auth: {
-      persistSession: false, // Don't save this session! Keep the Manager logged in.
+      storage: InMemoryStorage, // 👈 KEY FIX: Forces RAM only
       autoRefreshToken: false,
+      persistSession: false,
+      detectSessionInUrl: false,
     }
   });
 
-  // 2. Sign up the Merchant
+  // 2. Sign up the Merchant (This happens in "Incognito Mode" now)
   const { data: authData, error: authError } = await tempClient.auth.signUp({
     email,
     password,
@@ -23,8 +32,8 @@ export const createMerchantAccount = async (email, password, firstName, lastName
 
   if (authError) return { error: authError };
 
-  // 3. Add their details to the Profiles table
-  // We explicitly set 'is_password_changed' to FALSE so they must change it later.
+  // 3. Add details to Profiles
+  // We set 'is_new_user: true' so they ARE prompted when THEY log in
   const { error: profileError } = await tempClient 
     .from('profiles')
     .insert([{
@@ -33,10 +42,13 @@ export const createMerchantAccount = async (email, password, firstName, lastName
       first_name: firstName,
       last_name: lastName,
       store_name: storeName,
-      is_verified: true, // Merchants added by managers are auto-verified
+      is_verified: true, 
       created_by: managerId,
-      is_password_changed: false // <--- CRITICAL: Forces the password change screen
+      is_new_user: true //  Triggers password change for MERCHANT only
     }]);
+
+  // 4. Cleanup
+  await tempClient.auth.signOut();
 
   return { data: authData.user, error: profileError };
 };

@@ -33,7 +33,8 @@
         {
           "photosPermission": "The app needs to access your photos to let you upload product images."
         }
-      ]
+      ],
+      "expo-asset"
     ],
     "extra": {
       "eas": {

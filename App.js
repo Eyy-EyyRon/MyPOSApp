@@ -42,8 +42,10 @@ const NotificationBanner = ({ message, visible, onClose }) => {
     <Animated.View style={[styles.notificationWrapper, { transform: [{ translateY: slideAnim }] }]}>
       <SafeAreaView>
         <TouchableOpacity style={styles.notificationContent} onPress={closeBanner} activeOpacity={0.9}>
-          <View style={styles.iconCircle}><Ionicons name="cash" size={24} color={COLORS.success} /></View>
-          <View style={{flex: 1}}>
+          <View style={styles.iconCircle}>
+            <Ionicons name="cash" size={24} color={COLORS.success} />
+          </View>
+          <View style={{flex: 1, marginLeft: 10}}>
             <Text style={styles.notifTitle}>New Sale! 💰</Text>
             <Text style={styles.notifBody}>{message}</Text>
           </View>
@@ -58,7 +60,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [userRole, setUserRole] = useState(null);
   
-  // 🎬 INITIAL LOAD STATE (True only for the very first cold start)
+  // 🎬 INITIAL LOAD STATE
   const [appIsReady, setAppIsReady] = useState(false);
   const [isAnimationFinished, setIsAnimationFinished] = useState(false);
   const [profileError, setProfileError] = useState(false);
@@ -72,37 +74,36 @@ export default function App() {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session) {
-        fetchUserRole(session.user.id); // Fetch data, but keep Splash active until done
+        fetchUserRole(session.user.id); 
       } else {
-        setAppIsReady(true); // No user? Ready to show Auth Screen
+        setAppIsReady(true); 
       }
     });
 
-    // 2. Listen for Auth Changes (Login / Logout)
+    // 2. Listen for Auth Changes
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       
       if (session) {
-        // ⚠️ FIX: Do NOT set appIsReady(false) here. 
-        // This prevents the Splash Screen from showing up again during login.
         setProfileError(false);
         fetchUserRole(session.user.id);
       } else {
-        // Logout
         setUserRole(null);
-        setAppIsReady(true); // Ensure Auth screen shows
+        setAppIsReady(true);
       }
     });
 
     return () => { authListener.subscription.unsubscribe(); };
   }, []);
 
+  // 🔔 Real-time Sales Notification (Manager Only)
   useEffect(() => {
-    if (!userRole || userRole.role !== 'manager' || userRole.notifications_enabled === false) return;
+    if (!userRole || userRole.role !== 'manager') return;
 
     const subscription = supabase
       .channel('public:sales')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sales' }, (payload) => {
+        // Only trigger if it belongs to the manager's store
         if (payload.new.store_name === userRole.store_name) {
           triggerInAppNotification(`Received ₱${payload.new.total_amount} from ${payload.new.cashier_name}`);
         }
@@ -129,7 +130,6 @@ export default function App() {
       
       if (error) {
         if (error.code === 'PGRST116' && retries > 0) {
-          // Retry logic (silent, doesn't trigger splash)
           setTimeout(() => fetchUserRole(userId, retries - 1), 1000);
           return;
         }
@@ -144,7 +144,6 @@ export default function App() {
       console.log("Fetch Failed:", e.message);
       if (retries === 0) setProfileError(true);
     } finally {
-      // Mark app as ready (removes splash screen if it was the first load)
       setAppIsReady(true);
     }
   };
@@ -153,7 +152,7 @@ export default function App() {
     if (session?.user?.id) fetchUserRole(session.user.id);
   };
 
-  // 🎬 SPLASH SCREEN (Only shows on Cold Start)
+  // 🎬 SPLASH SCREEN
   if (!appIsReady || !isAnimationFinished) {
     return (
       <View style={styles.splashContainer}>
@@ -186,83 +185,70 @@ export default function App() {
     );
   }
 
-  // --- MAIN CONTENT ---
-  const renderContent = () => {
-    if (!session) return <AuthScreen />;
-    
-    // ⏳ LOADING STATE (Shows Spinner instead of Splash during login)
-    if (!userRole) {
-      return (
+  // --- MAIN CONTENT RENDERER ---
+  return (
+    <View style={{ flex: 1 }}>
+      {/* If not logged in, show Auth */}
+      {!session ? (
+        <AuthScreen />
+      ) : !userRole ? (
+        // Loading Spinner while fetching Role
         <View style={styles.splashContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
         </View>
-      );
-    }
+      ) : userRole.status === 'banned' ? (
+        <AuthScreen isBanned={true} />
+      ) : userRole.must_change_password || userRole.is_new_user ? ( 
+        // Force Password Change Logic
+        <ChangePasswordScreen onPasswordChanged={handlePasswordUpdateComplete} />
+      ) : (
+        // Main App Navigation
+        <NavigationContainer>
+          <Tab.Navigator
+            screenOptions={({ route }) => ({
+              headerShown: false,
+              tabBarStyle: styles.tabBar,
+              tabBarIcon: ({ focused, color, size }) => {
+                let iconName;
+                if (route.name === 'POS') iconName = focused ? 'calculator' : 'calculator-outline';
+                else if (route.name === 'Inventory') iconName = focused ? 'briefcase' : 'briefcase-outline';
+                else if (route.name === 'Sales') iconName = focused ? 'bar-chart' : 'bar-chart-outline';
+                else if (route.name === 'Admin') iconName = focused ? 'shield' : 'shield-outline';
+                else if (route.name === 'Settings') iconName = focused ? 'settings' : 'settings-outline';
+                return <Ionicons name={iconName} size={size} color={color} />;
+              },
+              tabBarActiveTintColor: COLORS.primary,
+              tabBarInactiveTintColor: '#9CA3AF',
+              tabBarLabelStyle: { fontSize: 11, fontWeight: '600', marginTop: -5 }
+            })}
+          >
+            {userRole.role === 'owner' ? (
+              // OWNER TABS
+              <>
+                <Tab.Screen name="Admin" component={OwnerScreen} />
+                <Tab.Screen name="Settings" component={SettingsScreen} />
+              </>
+            ) : (
+              // MERCHANT / MANAGER TABS
+              <>
+                <Tab.Screen name="POS">
+                  {() => <MerchantScreen user={userRole} />}
+                </Tab.Screen>
 
-    if (userRole.status === 'banned') return <AuthScreen isBanned={true} />; 
-    if (userRole.must_change_password) return <ChangePasswordScreen onPasswordChanged={handlePasswordUpdateComplete} />;
+                {userRole.role === 'manager' && (
+                  <>
+                    <Tab.Screen name="Inventory" component={ManagerScreen} />
+                    <Tab.Screen name="Sales" component={SalesScreen} />
+                  </>
+                )}
+                <Tab.Screen name="Settings" component={SettingsScreen} />
+              </>
+            )}
+          </Tab.Navigator>
+        </NavigationContainer>
+      )}
 
-    const isOwner = userRole?.role === 'owner';
-    const isManager = userRole?.role === 'manager';
-
-    return (
-      <NavigationContainer>
-        <Tab.Navigator
-          screenOptions={({ route }) => ({
-            headerShown: false,
-            tabBarStyle: { 
-              height: Platform.OS === 'android' ? 100 : 95, 
-              paddingBottom: Platform.OS === 'android' ? 40 : 35, 
-              paddingTop: 12,
-              backgroundColor: '#ffffff',
-              borderTopWidth: 0,
-              elevation: 20,
-              shadowColor: '#000', shadowOffset: { width: 0, height: -5 },
-              shadowOpacity: 0.1, shadowRadius: 10,
-              borderTopLeftRadius: 20, borderTopRightRadius: 20,
-            },
-            tabBarIcon: ({ focused, color, size }) => {
-              let iconName;
-              if (route.name === 'POS') iconName = focused ? 'calculator' : 'calculator-outline';
-              else if (route.name === 'Inventory') iconName = focused ? 'briefcase' : 'briefcase-outline';
-              else if (route.name === 'Sales') iconName = focused ? 'bar-chart' : 'bar-chart-outline';
-              else if (route.name === 'Admin') iconName = focused ? 'shield' : 'shield-outline';
-              else if (route.name === 'Settings') iconName = focused ? 'settings' : 'settings-outline';
-              return <Ionicons name={iconName} size={size} color={color} />;
-            },
-            tabBarActiveTintColor: COLORS.primary,
-            tabBarInactiveTintColor: '#9CA3AF',
-            tabBarLabelStyle: { fontSize: 11, fontWeight: '600', marginTop: -5 }
-          })}
-        >
-          {isOwner ? (
-            <>
-              <Tab.Screen name="Admin" component={OwnerScreen} />
-              <Tab.Screen name="Settings" component={SettingsScreen} />
-            </>
-          ) : (
-            <>
-              <Tab.Screen name="POS">
-                {() => <MerchantScreen user={userRole} />}
-              </Tab.Screen>
-
-              {isManager && (
-                <>
-                  <Tab.Screen name="Inventory" component={ManagerScreen} />
-                  <Tab.Screen name="Sales" component={SalesScreen} />
-                </>
-              )}
-              <Tab.Screen name="Settings" component={SettingsScreen} />
-            </>
-          )}
-        </Tab.Navigator>
-      </NavigationContainer>
-    );
-  };
-
-  return (
-    <View style={{ flex: 1 }}>
-      {renderContent()}
+      {/* Global Notification Banner */}
       <NotificationBanner visible={notifVisible} message={notifMessage} onClose={() => setNotifVisible(false)} />
     </View>
   );
@@ -271,24 +257,36 @@ export default function App() {
 const styles = StyleSheet.create({
   splashContainer: { flex: 1, backgroundColor: '#ffffff', alignItems: 'center', justifyContent: 'center' },
   notificationWrapper: {
-    position: 'absolute', top: 0, left: 0, right: 0,
-    zIndex: 9999, paddingTop: Platform.OS === 'android' ? 40 : 0,
+    position: 'absolute', top: 50, left: 20, right: 20, zIndex: 9999,
   },
   notificationContent: {
-    margin: 15, backgroundColor: 'white', borderRadius: 16, padding: 15,
+    backgroundColor: 'white', borderRadius: 16, padding: 15,
     flexDirection: 'row', alignItems: 'center',
     shadowColor: "#000", shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.15, shadowRadius: 10, elevation: 10,
     borderLeftWidth: 5, borderLeftColor: COLORS.success
   },
-  iconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#DEF7EC', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  iconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#DEF7EC', justifyContent: 'center', alignItems: 'center' },
   notifTitle: { fontWeight: 'bold', fontSize: 16, color: COLORS.dark, marginBottom: 2 },
   notifBody: { color: '#555', fontSize: 14 },
+  
   errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: '#FFF' },
   errorTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.dark, marginTop: 20 },
   errorText: { fontSize: 15, color: '#666', textAlign: 'center', marginVertical: 15, lineHeight: 22 },
   retryBtn: { marginTop: 20, backgroundColor: COLORS.primary, paddingHorizontal: 40, paddingVertical: 14, borderRadius: 12, width: '100%', alignItems: 'center' },
   retryText: { color: '#FFF', fontWeight: 'bold', fontSize: 16 },
   logoutBtn: { marginTop: 15, paddingVertical: 12, width: '100%', alignItems: 'center' },
-  logoutText: { color: COLORS.danger, fontWeight: 'bold', fontSize: 16 }
+  logoutText: { color: COLORS.danger, fontWeight: 'bold', fontSize: 16 },
+
+  tabBar: { 
+    height: Platform.OS === 'android' ? 70 : 85, 
+    paddingBottom: Platform.OS === 'android' ? 10 : 25, 
+    paddingTop: 10,
+    backgroundColor: '#ffffff',
+    borderTopWidth: 0,
+    elevation: 20,
+    shadowColor: '#000', shadowOffset: { width: 0, height: -5 },
+    shadowOpacity: 0.1, shadowRadius: 10,
+    borderTopLeftRadius: 20, borderTopRightRadius: 20,
+  }
 });
