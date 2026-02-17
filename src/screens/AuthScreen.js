@@ -12,7 +12,7 @@ const COLORS = {
   dark: '#111827',       
   bg: '#F9FAFB',         
   white: '#FFFFFF',
-  gray: '#6B7280', // Made slightly darker for better visibility
+  gray: '#6B7280', 
   inputBg: '#F3F4F6',
   borderColor: '#E5E7EB',
   danger: '#EF4444',
@@ -41,7 +41,8 @@ const InputField = ({ icon, placeholder, value, onChange, secure = false, autoCa
   </View>
 );
 
-export default function AuthScreen({ isBanned, forcePasswordChange }) {
+// ✅ ADDED onPasswordChanged PROP
+export default function AuthScreen({ isBanned, forcePasswordChange, onPasswordChanged }) {
   const [isLogin, setIsLogin] = useState(true);
   const [loading, setLoading] = useState(false);
   
@@ -85,11 +86,10 @@ export default function AuthScreen({ isBanned, forcePasswordChange }) {
         
         if (error) throw error;
 
-        // 🛑 CRITICAL FIX: Immediately Sign Out to prevent auto-login crash
         await supabase.auth.signOut();
 
         Alert.alert("Success", "Account created! You can now log in.");
-        setIsLogin(true); // Switch back to Login view
+        setIsLogin(true); 
       }
     } catch (error) {
       Alert.alert("Authentication Failed", error.message);
@@ -104,19 +104,34 @@ export default function AuthScreen({ isBanned, forcePasswordChange }) {
     
     setLoading(true);
     try {
+      // 1. Update Password in Auth
       const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
       if (updateError) throw updateError;
 
+      // 2. Update Profile Flags (BOTH of them to be safe)
       const { data: { user } } = await supabase.auth.getUser();
+      
       const { error: profileError } = await supabase
         .from('profiles')
-        .update({ must_change_password: false })
+        .update({ 
+          must_change_password: false, 
+          is_new_user: false  // ✅ Ensure this is also cleared
+        })
         .eq('id', user.id);
       
       if (profileError) throw profileError;
 
-      Alert.alert("Success", "Password updated successfully!");
-      setShowForceChange(false); 
+      // 3. Success & Redirect
+      Alert.alert("Success", "Password updated successfully!", [
+        {
+          text: "OK",
+          onPress: () => {
+            setShowForceChange(false);
+            // ✅ CRITICAL: Notify App.js to reload the user profile
+            if (onPasswordChanged) onPasswordChanged(); 
+          }
+        }
+      ]);
       
     } catch (error) {
       Alert.alert("Update Failed", error.message);
@@ -207,7 +222,6 @@ export default function AuthScreen({ isBanned, forcePasswordChange }) {
 
           {!isLogin && (
             <>
-              {/* FIXED: Ensure placeholder is explicitly passed */}
               <InputField icon="person-outline" placeholder="Full Name" value={firstName} onChange={setFirstName} autoCap="words" />
               <View style={{height: 15}} />
               <InputField icon="business-outline" placeholder="Store Name" value={storeName} onChange={setStoreName} autoCap="words" />
@@ -242,7 +256,7 @@ const styles = StyleSheet.create({
     flexGrow: 1, 
     justifyContent: 'center', 
     padding: 20,
-    paddingBottom: 40 // Extra padding for scrolling
+    paddingBottom: 40 
   },
   card: { backgroundColor: COLORS.white, borderRadius: 20, padding: 30, ...COLORS.shadow },
   logoContainer: { alignItems: 'center', marginBottom: 30 },

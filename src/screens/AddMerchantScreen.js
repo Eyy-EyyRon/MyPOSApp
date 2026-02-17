@@ -4,8 +4,7 @@ import {
   SafeAreaView, StatusBar, Platform, KeyboardAvoidingView 
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { tempSupabase } from '../lib/adminSupabase'; // 👈 IMPORT THE PHANTOM CLIENT
-import { supabase } from '../lib/supabase'; // 👈 IMPORT REGULAR CLIENT
+import { supabase } from '../lib/supabase'; // ✅ ONLY REGULAR CLIENT NEEDED
 
 // --- THEME COLORS ---
 const COLORS = {
@@ -63,45 +62,26 @@ export default function AddMerchantScreen({ managerId, onBack }) {
     setLoading(true);
 
     try {
-      // 2. Create Auth User using TEMP client (so Manager stays logged in)
-      const { data: authData, error: authError } = await tempSupabase.auth.signUp({
-        email: email,
-        password: password,
+      // ⚡️ 2. CALL THE SQL FUNCTION DIRECTLY
+      // This executes on the server, so your local session is NEVER touched.
+      const { data, error } = await supabase.rpc('create_user_by_manager', {
+        new_email: email,
+        new_password: password,
+        new_first_name: firstName,
+        new_last_name: lastName,
+        new_store_name: storeName,
+        manager_id: managerId
       });
 
-      if (authError) {
-        throw new Error(authError.message);
-      }
+      if (error) throw error;
 
-      if (!authData.user) {
-        throw new Error("User creation failed.");
-      }
-
-      // 3. Create Profile using REGULAR client (Manager's permission)
-      // We use the ID returned from the temp client
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .insert([
-          {
-            id: authData.user.id, // The ID of the new merchant
-            first_name: firstName,
-            last_name: lastName,
-            store_name: storeName,
-            role: 'merchant',
-            email: email
-          }
-        ]);
-
-      if (profileError) {
-        throw new Error("Profile creation failed: " + profileError.message);
-      }
-
-      // 4. Success!
+      // 3. Success!
       Alert.alert("Success", "Merchant Account Created Successfully!");
       onBack(); 
 
     } catch (error) {
-      Alert.alert("Error", error.message);
+      console.log("Creation Error:", error);
+      Alert.alert("Error", error.message || "Failed to create merchant");
     } finally {
       setLoading(false);
     }

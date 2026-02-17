@@ -1,8 +1,8 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { 
   View, Text, StyleSheet, TouchableOpacity, ScrollView, 
   RefreshControl, StatusBar, SafeAreaView, Platform, FlatList, Alert, 
-  ActivityIndicator, Modal, Image 
+  ActivityIndicator, Modal, Animated, Dimensions, TextInput
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
@@ -11,31 +11,44 @@ import { supabase } from '../lib/supabase';
 // --- THEME ---
 const COLORS = {
   primary: '#1E1B4B', 
-  accent: '#F59E0B', 
-  success: '#10B981',
-  danger: '#EF4444',
+  secondary: '#312E81', 
+  accent: '#F59E0B',  
+  success: '#10B981', 
+  danger: '#EF4444', 
+  warning: '#F59E0B',
   bg: '#F3F4F6',
   white: '#FFFFFF',
   text: '#1F2937',
   gray: '#9CA3AF',
   cardShadow: {
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
+    shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.1, shadowRadius: 8, elevation: 4,
   }
 };
 
+const SCREEN_WIDTH = Dimensions.get('window').width;
+
+// 💰 PAYROLL SETTINGS (Est. Monthly Salary)
+const PAYROLL_RATES = {
+    manager: 25000, 
+    merchant: 15000
+};
+
 export default function OwnerScreen() {
-  const [currentTab, setCurrentTab] = useState('dashboard'); // 'dashboard' | 'people' | 'logs'
-  const [peopleFilter, setPeopleFilter] = useState('all');   // 'all' | 'manager' | 'merchant'
+  const [currentTab, setCurrentTab] = useState('dashboard'); 
+  const [peopleFilter, setPeopleFilter] = useState('all');   
+  const [dashboardRange, setDashboardRange] = useState('today');
+
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
   // Data
-  const [stats, setStats] = useState({ totalRevenue: 0, totalStores: 0, totalUsers: 0 });
+  const [stats, setStats] = useState({ 
+    totalRevenue: 0, totalStores: 0, totalStaff: 0, 
+    estimatedProfit: 0, cogs: 0, laborCost: 0 
+  });
+  
   const [usersList, setUsersList] = useState([]);
+  const [payrollData, setPayrollData] = useState({ managers: 0, merchants: 0, totalCost: 0 });
   const [auditLogs, setAuditLogs] = useState([]);
   const [topStores, setTopStores] = useState([]);
 
@@ -44,25 +57,58 @@ export default function OwnerScreen() {
   const [userStats, setUserStats] = useState(null);
   const [detailModalVisible, setDetailModalVisible] = useState(false);
 
+  // 📢 Announcement Modal
+  const [broadcastVisible, setBroadcastVisible] = useState(false);
+  const [broadcastMessage, setBroadcastMessage] = useState('');
+
   useFocusEffect(
     useCallback(() => {
       fetchGlobalData();
-    }, [])
+    }, [dashboardRange]) 
   );
 
   const fetchGlobalData = async () => {
     try {
       if (refreshing) setLoading(true);
 
-      // 1. Global Stats
-      const { data: allSales } = await supabase.from('sales').select('total_amount, store_name');
-      const totalRev = (allSales || []).reduce((sum, s) => sum + s.total_amount, 0);
+      // 1. DATE FILTER LOGIC
+      let dateQuery = supabase.from('sales').select('total_amount, store_name, sale_date');
+      const now = new Date();
+      if (dashboardRange === 'today') {
+        const startOfDay = new Date(now.setHours(0,0,0,0)).toISOString();
+        dateQuery = dateQuery.gte('sale_date', startOfDay);
+      } else if (dashboardRange === 'week') {
+        const firstDay = new Date(now.setDate(now.getDate() - now.getDay())).toISOString();
+        dateQuery = dateQuery.gte('sale_date', firstDay);
+      }
+
+      // 2. FETCH SALES
+      const { data: salesData, error } = await dateQuery;
+      if (error) throw error;
+      const totalRev = (salesData || []).reduce((sum, s) => sum + s.total_amount, 0);
+
+      // 3. FETCH STAFF & STORES
+      const { data: users } = await supabase.from('profiles').select('*');
+      const activeStaff = users.filter(u => u.status === 'active' && u.role !== 'owner');
       
-      const { count: userCount, data: users } = await supabase.from('profiles').select('*', { count: 'exact' });
+      // 4. CALCULATE PAYROLL (Global Staff Management)
+      const mgrCount = activeStaff.filter(u => u.role === 'manager').length;
+      const merchCount = activeStaff.filter(u => u.role === 'merchant').length;
+      const monthlyPayroll = (mgrCount * PAYROLL_RATES.manager) + (merchCount * PAYROLL_RATES.merchant);
+      setPayrollData({ managers: mgrCount, merchants: merchCount, totalCost: monthlyPayroll });
+
+      // 5. CALCULATE PROFIT
+      const COGS_PERCENTAGE = 0.70; 
+      const estimatedCOGS = totalRev * COGS_PERCENTAGE;
+      // Convert monthly payroll to daily estimate for the "Today" view
+      const dailyLabor = monthlyPayroll / 30; 
+      const actualLaborCost = dashboardRange === 'today' ? dailyLabor : (dailyLabor * 7); // Rough estimate
       
-      // 2. Store Rankings
+      const estimatedProfit = totalRev - estimatedCOGS - actualLaborCost;
+
+      // 6. STORE RANKINGS
       const storeMap = {};
-      (allSales || []).forEach(sale => {
+      (salesData || []).forEach(sale => {
         const name = sale.store_name || "Unknown";
         if (!storeMap[name]) storeMap[name] = 0;
         storeMap[name] += sale.total_amount;
@@ -70,18 +116,22 @@ export default function OwnerScreen() {
       const rankings = Object.keys(storeMap)
         .map(key => ({ name: key, revenue: storeMap[key] }))
         .sort((a, b) => b.revenue - a.revenue)
-        .slice(0, 5); // Top 5
+        .slice(0, 5); 
 
       setStats({
         totalRevenue: totalRev,
         totalStores: Object.keys(storeMap).length,
-        totalUsers: userCount || 0
+        totalStaff: activeStaff.length,
+        estimatedProfit: estimatedProfit,
+        cogs: estimatedCOGS,
+        laborCost: actualLaborCost
       });
+
       setTopStores(rankings);
       setUsersList(users || []);
 
-      // 3. Logs
-      const { data: logs } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(20);
+      // 7. 🛡️ AUDIT LOGS
+      const { data: logs } = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(30);
       setAuditLogs(logs || []);
 
     } catch (e) {
@@ -92,87 +142,98 @@ export default function OwnerScreen() {
     }
   };
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    fetchGlobalData();
+  const onRefresh = () => { setRefreshing(true); fetchGlobalData(); };
+
+  // --- 📢 BROADCAST LOGIC ---
+  const handleSendBroadcast = async () => {
+      if (!broadcastMessage.trim()) return Alert.alert("Empty", "Please type a message.");
+      
+      try {
+          setLoading(true);
+          const { error } = await supabase.from('announcements').insert([{
+              message: broadcastMessage,
+              is_active: true
+          }]);
+
+          if (error) throw error;
+
+          Alert.alert("Sent!", "Announcement has been broadcasted to all staff.");
+          setBroadcastMessage('');
+          setBroadcastVisible(false);
+      } catch (e) {
+          Alert.alert("Error", e.message);
+      } finally {
+          setLoading(false);
+      }
   };
 
-  // --- DRILL DOWN LOGIC ---
+  // --- ACTIONS ---
   const handleUserClick = async (user) => {
     setSelectedUser(user);
     setDetailModalVisible(true);
-    setUserStats(null); // Reset while loading
-
-    // Fetch specific stats based on role
-    try {
-      if (user.role === 'manager') {
-        // Manager Stats: Inventory Value & Staff Count
-        const { data: products } = await supabase.from('products').select('price, stock').eq('store_name', user.store_name);
-        const invValue = (products || []).reduce((sum, p) => sum + (p.price * p.stock), 0);
-        
-        const { count: staffCount } = await supabase.from('profiles').select('*', { count: 'exact', head: true }).eq('store_name', user.store_name).eq('role', 'merchant');
-        
-        setUserStats({ type: 'manager', inventoryValue: invValue, staffCount: staffCount || 0 });
-
-      } else if (user.role === 'merchant') {
-        // Merchant Stats: Personal Sales
-        const { data: sales } = await supabase.from('sales').select('total_amount').eq('store_name', user.store_name).eq('cashier_name', user.first_name); // Best effort link
-        const totalSales = (sales || []).reduce((sum, s) => sum + s.total_amount, 0);
-        
-        setUserStats({ type: 'merchant', totalSales: totalSales, txCount: sales?.length || 0 });
-      }
-    } catch (e) {
-      console.log(e);
-    }
+    setUserStats(null); 
   };
 
   const toggleBanStatus = async () => {
     if (!selectedUser) return;
     const newStatus = selectedUser.status === 'active' ? 'banned' : 'active';
-    
-    Alert.alert(
-      "Confirm Action",
-      `Are you sure you want to ${newStatus === 'banned' ? 'BAN' : 'ACTIVATE'} this user?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Confirm", 
-          onPress: async () => {
-            await supabase.from('profiles').update({ status: newStatus }).eq('id', selectedUser.id);
-            setSelectedUser(prev => ({ ...prev, status: newStatus }));
-            setUsersList(prev => prev.map(u => u.id === selectedUser.id ? { ...u, status: newStatus } : u));
-          }
-        }
-      ]
-    );
+    await supabase.from('profiles').update({ status: newStatus }).eq('id', selectedUser.id);
+    setSelectedUser(prev => ({ ...prev, status: newStatus }));
+    setUsersList(prev => prev.map(u => u.id === selectedUser.id ? { ...u, status: newStatus } : u));
   };
 
   // --- RENDERERS ---
   const renderUserItem = ({ item }) => {
     if (peopleFilter !== 'all' && item.role !== peopleFilter) return null;
-    if (item.role === 'owner') return null; // Hide self
-
+    if (item.role === 'owner') return null; 
     const isManager = item.role === 'manager';
     return (
       <TouchableOpacity style={styles.userRow} onPress={() => handleUserClick(item)}>
         <View style={[styles.avatarBox, { backgroundColor: isManager ? '#E0E7FF' : '#FFF7ED' }]}>
-          <Text style={{ fontSize: 18, fontWeight: 'bold', color: isManager ? COLORS.primary : COLORS.accent }}>
-            {item.first_name?.[0]}
-          </Text>
+          <Text style={{ fontSize: 18, fontWeight: 'bold', color: isManager ? COLORS.primary : COLORS.accent }}>{item.first_name?.[0]}</Text>
         </View>
         <View style={{ flex: 1, paddingHorizontal: 12 }}>
           <Text style={styles.rowTitle}>{item.first_name} {item.last_name}</Text>
-          <Text style={styles.rowSub}>
-            {item.role.toUpperCase()} • {item.store_name || "No Store"}
-          </Text>
+          <Text style={styles.rowSub}>{item.role.toUpperCase()} • {item.store_name || "No Store"}</Text>
         </View>
         <View style={[styles.statusBadge, { backgroundColor: item.status === 'active' ? '#DCFCE7' : '#FEE2E2' }]}>
-          <Text style={[styles.statusText, { color: item.status === 'active' ? COLORS.success : COLORS.danger }]}>
-            {item.status === 'active' ? 'Active' : 'Banned'}
-          </Text>
+          <Text style={[styles.statusText, { color: item.status === 'active' ? COLORS.success : COLORS.danger }]}>{item.status === 'active' ? 'Active' : 'Banned'}</Text>
         </View>
       </TouchableOpacity>
     );
+  };
+
+  // --- 🛡️ LOG RENDERER (Smart Highlighting) ---
+  const renderLogItem = ({ item }) => {
+      // Detect suspicious keywords
+      const desc = item.description.toLowerCase();
+      const isCritical = desc.includes('delete') || desc.includes('refund') || desc.includes('banned');
+      const isWarning = desc.includes('edit') || desc.includes('stock');
+
+      let icon = "git-commit-outline";
+      let iconColor = COLORS.gray;
+      let bgColor = "#fff";
+
+      if (isCritical) {
+          icon = "alert-circle";
+          iconColor = COLORS.danger;
+          bgColor = "#FEF2F2"; // Light Red
+      } else if (isWarning) {
+          icon = "create-outline";
+          iconColor = COLORS.warning;
+      }
+
+      return (
+        <View style={[styles.logRow, { backgroundColor: bgColor }]}>
+            <View style={{width: 30, alignItems:'center'}}>
+                <Ionicons name={icon} size={20} color={iconColor} />
+            </View>
+            <View style={{ marginLeft: 10, flex: 1 }}>
+                <Text style={[styles.logDesc, isCritical && {color: COLORS.danger, fontWeight:'bold'}]}>{item.description}</Text>
+                <Text style={styles.logDate}>{new Date(item.created_at).toLocaleString()}</Text>
+            </View>
+        </View>
+      );
   };
 
   return (
@@ -181,17 +242,17 @@ export default function OwnerScreen() {
       
       {/* HEADER */}
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Owner Command</Text>
+        <View style={{flexDirection:'row', justifyContent:'space-between', alignItems:'center', marginBottom:15}}>
+            <Text style={styles.headerTitle}>Owner Command</Text>
+            {/* 📢 BROADCAST BUTTON */}
+            <TouchableOpacity style={styles.broadcastBtn} onPress={() => setBroadcastVisible(true)}>
+                <Ionicons name="megaphone" size={20} color="#fff" />
+            </TouchableOpacity>
+        </View>
         <View style={styles.tabBar}>
           {['dashboard', 'people', 'logs'].map(tab => (
-            <TouchableOpacity 
-              key={tab} 
-              style={[styles.tabBtn, currentTab === tab && styles.tabActive]} 
-              onPress={() => setCurrentTab(tab)}
-            >
-              <Text style={[styles.tabText, currentTab === tab && styles.tabTextActive]}>
-                {tab.charAt(0).toUpperCase() + tab.slice(1)}
-              </Text>
+            <TouchableOpacity key={tab} style={[styles.tabBtn, currentTab === tab && styles.tabActive]} onPress={() => setCurrentTab(tab)}>
+              <Text style={[styles.tabText, currentTab === tab && styles.tabTextActive]}>{tab.charAt(0).toUpperCase() + tab.slice(1)}</Text>
             </TouchableOpacity>
           ))}
         </View>
@@ -201,61 +262,78 @@ export default function OwnerScreen() {
         {/* VIEW: DASHBOARD */}
         {currentTab === 'dashboard' && (
           <ScrollView refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}>
-            <View style={styles.heroCard}>
-              <Text style={styles.heroLabel}>Total Revenue</Text>
-              <Text style={styles.heroValue}>₱{stats.totalRevenue.toLocaleString()}</Text>
-              <Text style={styles.heroSub}>Across {stats.totalStores} Active Stores</Text>
+            {/* DATE TOGGLE */}
+            <View style={styles.dateToggleContainer}>
+                {['today', 'week', 'all'].map(range => (
+                    <TouchableOpacity key={range} style={[styles.dateToggleBtn, dashboardRange === range && { backgroundColor: COLORS.white, ...COLORS.cardShadow }]} onPress={() => setDashboardRange(range)}>
+                        <Text style={[styles.dateToggleText, dashboardRange === range && { color: COLORS.primary, fontWeight:'bold' }]}>{range.toUpperCase()}</Text>
+                    </TouchableOpacity>
+                ))}
             </View>
 
-            <Text style={styles.sectionTitle}>Top Performing Stores</Text>
-            {topStores.map((store, index) => (
-              <View key={index} style={styles.rankRow}>
-                <View style={[styles.rankBadge, { backgroundColor: index === 0 ? '#FEF3C7' : '#F3F4F6' }]}>
-                  <Text style={{ fontWeight: 'bold', color: index === 0 ? COLORS.accent : COLORS.gray }}>#{index + 1}</Text>
-                </View>
-                <Text style={styles.rankName}>{store.name}</Text>
-                <Text style={styles.rankValue}>₱{store.revenue.toLocaleString()}</Text>
+            {/* REVENUE CARD */}
+            <View style={styles.heroCard}>
+              <View style={styles.heroRow}>
+                  <View><Text style={styles.heroLabel}>TOTAL REVENUE</Text><Text style={styles.heroValue}>₱{stats.totalRevenue.toLocaleString()}</Text></View>
+                  <View style={styles.heroIconCircle}><Ionicons name="trending-up" size={28} color="#fff" /></View>
               </View>
+              <View style={styles.heroFooter}>
+                  <Text style={styles.heroSub}>{stats.totalStores} Active Stores</Text>
+                  <Text style={styles.heroSub}>{stats.totalStaff} Active Staff</Text>
+              </View>
+            </View>
+
+            {/* PROFIT ESTIMATOR */}
+            <View style={styles.profitCard}>
+                <Text style={styles.sectionTitleSmall}>PROFIT ESTIMATOR</Text>
+                <View style={styles.calcRow}><Text style={styles.calcLabel}>Gross Sales</Text><Text style={styles.calcValue}>₱{stats.totalRevenue.toLocaleString()}</Text></View>
+                <View style={styles.calcRow}><Text style={styles.calcLabel}>Cost of Goods (70%)</Text><Text style={[styles.calcValue, {color: COLORS.danger}]}>- ₱{stats.cogs.toLocaleString()}</Text></View>
+                <View style={styles.calcRow}><Text style={styles.calcLabel}>Labor Cost (Est.)</Text><Text style={[styles.calcValue, {color: COLORS.danger}]}>- ₱{stats.laborCost.toLocaleString()}</Text></View>
+                <View style={styles.divider} />
+                <View style={styles.calcRow}><Text style={[styles.calcLabel, {fontWeight:'bold', color: COLORS.primary}]}>NET PROFIT</Text><Text style={[styles.calcValue, {fontWeight:'bold', color: stats.estimatedProfit >= 0 ? COLORS.success : COLORS.danger, fontSize: 18}]}>₱{stats.estimatedProfit.toLocaleString()}</Text></View>
+            </View>
+
+            {/* LEADERBOARD */}
+            <Text style={styles.sectionTitle}>Store Rankings</Text>
+            {topStores.map((store, index) => (
+                <View key={index} style={styles.rankRow}>
+                    <View style={styles.rankInfo}>
+                        <View style={[styles.rankBadge, { backgroundColor: index === 0 ? '#FEF3C7' : '#F3F4F6' }]}><Text style={{ fontWeight: 'bold', color: index === 0 ? COLORS.accent : COLORS.gray }}>#{index + 1}</Text></View>
+                        <Text style={styles.rankName}>{store.name}</Text>
+                        <Text style={styles.rankValue}>₱{store.revenue.toLocaleString()}</Text>
+                    </View>
+                    <View style={styles.barContainer}><View style={[styles.barFill, { width: `${(store.revenue / (topStores[0]?.revenue || 1)) * 100}%`, backgroundColor: index === 0 ? COLORS.success : COLORS.primary }]} /></View>
+                </View>
             ))}
+            <View style={{height: 40}} />
           </ScrollView>
         )}
 
         {/* VIEW: PEOPLE */}
         {currentTab === 'people' && (
           <View style={{ flex: 1 }}>
+            {/* 👥 PAYROLL SUMMARY CARD */}
+            <View style={styles.payrollCard}>
+                <View style={{flexDirection:'row', justifyContent:'space-between', marginBottom:10}}>
+                    <Text style={styles.payrollTitle}>Monthly Payroll Est.</Text>
+                    <Ionicons name="people" size={20} color={COLORS.primary} />
+                </View>
+                <Text style={styles.payrollBig}>₱{payrollData.totalCost.toLocaleString()}</Text>
+                <Text style={styles.payrollSub}>{payrollData.managers} Managers • {payrollData.merchants} Merchants</Text>
+            </View>
+
             <View style={styles.filterRow}>
                {['all', 'manager', 'merchant'].map(f => (
-                 <TouchableOpacity key={f} onPress={() => setPeopleFilter(f)} style={[styles.filterChip, peopleFilter === f && styles.filterActive]}>
-                   <Text style={[styles.filterText, peopleFilter === f && { color: '#fff' }]}>{f.toUpperCase()}</Text>
-                 </TouchableOpacity>
+                 <TouchableOpacity key={f} onPress={() => setPeopleFilter(f)} style={[styles.filterChip, peopleFilter === f && styles.filterActive]}><Text style={[styles.filterText, peopleFilter === f && { color: '#fff' }]}>{f.toUpperCase()}</Text></TouchableOpacity>
                ))}
             </View>
-            <FlatList 
-              data={usersList} 
-              renderItem={renderUserItem} 
-              keyExtractor={item => item.id}
-              contentContainerStyle={{ paddingBottom: 100 }}
-              refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-            />
+            <FlatList data={usersList} renderItem={renderUserItem} keyExtractor={item => item.id} contentContainerStyle={{ paddingBottom: 100 }} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />} />
           </View>
         )}
 
         {/* VIEW: LOGS */}
         {currentTab === 'logs' && (
-          <FlatList 
-            data={auditLogs}
-            keyExtractor={item => item.id.toString()}
-            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-            renderItem={({ item }) => (
-              <View style={styles.logRow}>
-                <Ionicons name="git-commit-outline" size={20} color={COLORS.gray} />
-                <View style={{ marginLeft: 10, flex: 1 }}>
-                  <Text style={styles.logDesc}>{item.description}</Text>
-                  <Text style={styles.logDate}>{new Date(item.created_at).toLocaleString()}</Text>
-                </View>
-              </View>
-            )}
-          />
+          <FlatList data={auditLogs} keyExtractor={item => item.id.toString()} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />} renderItem={renderLogItem} />
         )}
       </View>
 
@@ -264,57 +342,41 @@ export default function OwnerScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
-              <View style={styles.modalAvatar}>
-                <Text style={{ fontSize: 30, color: '#fff', fontWeight: 'bold' }}>{selectedUser?.first_name?.[0]}</Text>
-              </View>
+              <View style={styles.modalAvatar}><Text style={{ fontSize: 30, color: '#fff', fontWeight: 'bold' }}>{selectedUser?.first_name?.[0]}</Text></View>
               <Text style={styles.modalName}>{selectedUser?.first_name} {selectedUser?.last_name}</Text>
               <Text style={styles.modalRole}>{selectedUser?.role?.toUpperCase()}</Text>
               <Text style={styles.modalStore}>{selectedUser?.store_name}</Text>
             </View>
-
-            <View style={styles.statsGrid}>
-              {userStats ? (
-                userStats.type === 'manager' ? (
-                  <>
-                    <View style={styles.statBox}>
-                      <Text style={styles.statLabel}>Inventory Value</Text>
-                      <Text style={styles.statNum}>₱{userStats.inventoryValue.toLocaleString()}</Text>
-                    </View>
-                    <View style={styles.statBox}>
-                      <Text style={styles.statLabel}>Staff Count</Text>
-                      <Text style={styles.statNum}>{userStats.staffCount}</Text>
-                    </View>
-                  </>
-                ) : (
-                   <>
-                    <View style={styles.statBox}>
-                      <Text style={styles.statLabel}>Total Sales</Text>
-                      <Text style={styles.statNum}>₱{userStats.totalSales.toLocaleString()}</Text>
-                    </View>
-                    <View style={styles.statBox}>
-                      <Text style={styles.statLabel}>Transactions</Text>
-                      <Text style={styles.statNum}>{userStats.txCount}</Text>
-                    </View>
-                  </>
-                )
-              ) : (
-                <ActivityIndicator color={COLORS.primary} style={{ margin: 20 }} />
-              )}
-            </View>
-
-            <TouchableOpacity 
-               style={[styles.banBtn, { backgroundColor: selectedUser?.status === 'active' ? '#FEF2F2' : '#ECFDF5' }]} 
-               onPress={toggleBanStatus}
-            >
-               <Text style={[styles.banText, { color: selectedUser?.status === 'active' ? COLORS.danger : COLORS.success }]}>
-                 {selectedUser?.status === 'active' ? "BAN USER" : "ACTIVATE USER"}
-               </Text>
+            <TouchableOpacity style={[styles.banBtn, { backgroundColor: selectedUser?.status === 'active' ? '#FEF2F2' : '#ECFDF5' }]} onPress={toggleBanStatus}>
+               <Text style={[styles.banText, { color: selectedUser?.status === 'active' ? COLORS.danger : COLORS.success }]}>{selectedUser?.status === 'active' ? "BAN USER" : "ACTIVATE USER"}</Text>
             </TouchableOpacity>
-
-            <TouchableOpacity style={styles.closeBtn} onPress={() => setDetailModalVisible(false)}>
-              <Text style={{ color: COLORS.gray }}>Close</Text>
-            </TouchableOpacity>
+            <TouchableOpacity style={styles.closeBtn} onPress={() => setDetailModalVisible(false)}><Text style={{ color: COLORS.gray }}>Close</Text></TouchableOpacity>
           </View>
+        </View>
+      </Modal>
+
+      {/* 📢 MODAL: BROADCAST */}
+      <Modal visible={broadcastVisible} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+            <View style={styles.modalCard}>
+                <View style={{alignItems:'center', marginBottom:20}}>
+                    <View style={[styles.heroIconCircle, {backgroundColor: COLORS.accent, marginBottom:10}]}><Ionicons name="megaphone" size={30} color="#fff"/></View>
+                    <Text style={styles.modalName}>Staff Announcement</Text>
+                    <Text style={{textAlign:'center', color:COLORS.gray, marginTop:5}}>Send a notification to all active Managers and Merchants.</Text>
+                </View>
+                <TextInput 
+                    style={styles.broadcastInput} 
+                    placeholder="Type your message here..." 
+                    multiline 
+                    numberOfLines={4} 
+                    value={broadcastMessage}
+                    onChangeText={setBroadcastMessage}
+                />
+                <TouchableOpacity style={[styles.banBtn, {backgroundColor: COLORS.primary}]} onPress={handleSendBroadcast}>
+                    <Text style={[styles.banText, {color: '#fff'}]}>SEND BROADCAST</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.closeBtn} onPress={() => setBroadcastVisible(false)}><Text style={{ color: COLORS.gray }}>Cancel</Text></TouchableOpacity>
+            </View>
         </View>
       </Modal>
 
@@ -327,7 +389,8 @@ const styles = StyleSheet.create({
   
   // HEADER
   header: { backgroundColor: COLORS.primary, padding: 20, paddingTop: Platform.OS === 'android' ? 40 : 10, borderBottomLeftRadius: 24, borderBottomRightRadius: 24, zIndex: 10 },
-  headerTitle: { color: '#fff', fontSize: 22, fontWeight: 'bold', marginBottom: 15 },
+  headerTitle: { color: '#fff', fontSize: 22, fontWeight: 'bold' },
+  broadcastBtn: { padding: 10, backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12 },
   tabBar: { flexDirection: 'row', backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, padding: 4 },
   tabBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 10 },
   tabActive: { backgroundColor: '#fff' },
@@ -336,19 +399,42 @@ const styles = StyleSheet.create({
 
   body: { flex: 1, padding: 20 },
 
-  // DASHBOARD
-  heroCard: { backgroundColor: COLORS.primary, padding: 25, borderRadius: 20, marginBottom: 25, alignItems: 'center', ...COLORS.cardShadow },
-  heroLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 14, textTransform: 'uppercase', letterSpacing: 1 },
-  heroValue: { color: '#fff', fontSize: 36, fontWeight: 'bold', marginVertical: 5 },
-  heroSub: { color: COLORS.accent, fontWeight: 'bold' },
+  // DATE TOGGLE
+  dateToggleContainer: { flexDirection: 'row', backgroundColor: '#E5E7EB', borderRadius: 12, padding: 4, marginBottom: 20 },
+  dateToggleBtn: { flex: 1, paddingVertical: 8, alignItems: 'center', borderRadius: 10 },
+  dateToggleText: { fontSize: 12, fontWeight: '600', color: COLORS.gray },
+
+  // DASHBOARD CARDS
+  heroCard: { backgroundColor: COLORS.primary, padding: 20, borderRadius: 20, marginBottom: 15, ...COLORS.cardShadow },
+  heroRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start' },
+  heroLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 12, fontWeight:'bold', letterSpacing: 1, marginBottom: 5 },
+  heroValue: { color: '#fff', fontSize: 32, fontWeight: 'bold' },
+  heroIconCircle: { width: 50, height: 50, borderRadius: 25, backgroundColor: 'rgba(255,255,255,0.1)', justifyContent: 'center', alignItems: 'center' },
+  heroFooter: { flexDirection: 'row', gap: 15, marginTop: 15, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', paddingTop: 10 },
+  heroSub: { color: COLORS.accent, fontWeight: 'bold', fontSize: 12 },
+
+  profitCard: { backgroundColor: '#fff', borderRadius: 20, padding: 20, marginBottom: 25, ...COLORS.cardShadow },
+  sectionTitleSmall: { fontSize: 14, fontWeight: 'bold', color: COLORS.gray, marginBottom: 15, letterSpacing:1 },
+  calcRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+  calcLabel: { fontSize: 14, color: COLORS.text },
+  calcValue: { fontSize: 14, fontWeight: '600', color: COLORS.text },
+  divider: { height: 1, backgroundColor: '#E5E7EB', marginVertical: 10 },
 
   sectionTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.text, marginBottom: 15 },
-  rankRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', padding: 15, borderRadius: 12, marginBottom: 10, ...COLORS.cardShadow },
-  rankBadge: { width: 30, height: 30, borderRadius: 15, justifyContent: 'center', alignItems: 'center', marginRight: 15 },
-  rankName: { flex: 1, fontSize: 16, fontWeight: '600', color: COLORS.text },
-  rankValue: { fontSize: 16, fontWeight: 'bold', color: COLORS.success },
+  rankRow: { backgroundColor: '#fff', padding: 15, borderRadius: 12, marginBottom: 10, ...COLORS.cardShadow },
+  rankInfo: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
+  rankBadge: { width: 24, height: 24, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginRight: 10 },
+  rankName: { flex: 1, fontSize: 15, fontWeight: '600', color: COLORS.text },
+  rankValue: { fontSize: 15, fontWeight: 'bold', color: COLORS.success },
+  barContainer: { height: 6, backgroundColor: '#F3F4F6', borderRadius: 3, overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: 3 },
 
   // PEOPLE LIST
+  payrollCard: { backgroundColor: '#fff', padding: 20, borderRadius: 20, marginBottom: 20, borderLeftWidth: 5, borderLeftColor: COLORS.primary, ...COLORS.cardShadow },
+  payrollTitle: { fontSize: 14, color: COLORS.gray, fontWeight: '600' },
+  payrollBig: { fontSize: 28, fontWeight: 'bold', color: COLORS.text, marginVertical: 5 },
+  payrollSub: { fontSize: 12, color: COLORS.gray },
+
   filterRow: { flexDirection: 'row', marginBottom: 15, gap: 10 },
   filterChip: { paddingHorizontal: 15, paddingVertical: 8, borderRadius: 20, backgroundColor: '#E5E7EB' },
   filterActive: { backgroundColor: COLORS.primary },
@@ -362,7 +448,7 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 10, fontWeight: 'bold' },
 
   // LOGS
-  logRow: { flexDirection: 'row', padding: 15, backgroundColor: '#fff', marginBottom: 1, borderBottomWidth: 1, borderColor: '#F3F4F6' },
+  logRow: { flexDirection: 'row', padding: 15, backgroundColor: '#fff', marginBottom: 1, borderBottomWidth: 1, borderColor: '#F3F4F6', alignItems:'center' },
   logDesc: { fontSize: 14, color: COLORS.text },
   logDate: { fontSize: 11, color: COLORS.gray, marginTop: 4 },
 
@@ -374,13 +460,9 @@ const styles = StyleSheet.create({
   modalName: { fontSize: 22, fontWeight: 'bold', color: COLORS.text },
   modalRole: { fontSize: 12, fontWeight: 'bold', color: COLORS.gray, marginTop: 2 },
   modalStore: { fontSize: 16, color: COLORS.primary, fontWeight: '600', marginTop: 5 },
-
-  statsGrid: { flexDirection: 'row', gap: 15, marginBottom: 25 },
-  statBox: { flex: 1, backgroundColor: '#F9FAFB', padding: 15, borderRadius: 12, alignItems: 'center' },
-  statLabel: { fontSize: 12, color: COLORS.gray, marginBottom: 5 },
-  statNum: { fontSize: 18, fontWeight: 'bold', color: COLORS.text },
-
   banBtn: { width: '100%', padding: 15, borderRadius: 12, alignItems: 'center', marginBottom: 10 },
   banText: { fontWeight: 'bold' },
   closeBtn: { alignItems: 'center', padding: 10 },
+  
+  broadcastInput: { backgroundColor: '#F9FAFB', borderRadius: 12, padding: 15, height: 120, textAlignVertical:'top', marginBottom: 20, fontSize: 16 },
 });
