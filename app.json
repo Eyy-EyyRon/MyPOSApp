@@ -14,7 +14,8 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.eyyyronne.MyPOSApp"
     },
     "android": {
       "adaptiveIcon": {
@@ -22,7 +23,8 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.eyyyronne.MyPOSApp"
+      "package": "com.eyyyronne.MyPOSApp",
+      "permissions": ["CAMERA"]
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -33,6 +35,12 @@
         "expo-image-picker",
         {
           "photosPermission": "The app needs to access your photos to let you upload product images."
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Nexus POS to access your camera to scan barcodes."
         }
       ],
       "expo-asset",
