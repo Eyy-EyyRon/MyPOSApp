@@ -3,6 +3,7 @@
     "name": "POS",
     "slug": "MyPOSApp",
     "version": "1.0.0",
+    "scheme": "myposapp",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -34,7 +35,8 @@
           "photosPermission": "The app needs to access your photos to let you upload product images."
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-secure-store"
     ],
     "extra": {
       "eas": {

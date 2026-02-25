@@ -6,6 +6,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
 import LottieView from 'lottie-react-native'; 
+import * as Linking from 'expo-linking'; 
 
 // --- SCREENS ---
 import AuthScreen from './src/screens/AuthScreen';
@@ -18,7 +19,16 @@ import OwnerScreen from './src/screens/OwnerScreen';
 import { supabase } from './src/lib/supabase';
 
 const Tab = createBottomTabNavigator();
-const COLORS = { primary: '#130f5f', dark: '#111827', success: '#10B981', white: '#FFF', danger: '#EF4444' };
+
+// ─── ALIGNED DESIGN TOKENS ───
+const COLORS = { 
+  primary: '#FFB800', // Matches C.gold
+  dark: '#0A0D14',    // Matches C.bg
+  surface: '#131722', 
+  success: '#10B981', 
+  white: '#FFFFFF', 
+  danger: '#FF4A4A' 
+};
 
 // --- CUSTOM NOTIFICATION COMPONENT ---
 const NotificationBanner = ({ message, visible, onClose }) => {
@@ -63,12 +73,42 @@ export default function App() {
   const [isAnimationFinished, setIsAnimationFinished] = useState(false);
   const [profileError, setProfileError] = useState(false);
 
+  // PASSWORD RECOVERY STATE
+  const [isRecoveringPassword, setIsRecoveringPassword] = useState(false);
+
   // Notification State
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMessage, setNotifMessage] = useState("");
 
   useEffect(() => {
-    // 1. Initial Session Check (Cold Start)
+    // 1. DEEP LINK LISTENER
+    const handleUrl = async (url) => {
+      if (!url) return;
+      const hashPart = url.split('#')[1];
+      if (!hashPart) return;
+
+      const params = {};
+      hashPart.split('&').forEach(pair => {
+        const [key, value] = pair.split('=');
+        params[key] = decodeURIComponent(value);
+      });
+
+      if (params.access_token && params.refresh_token) {
+        const { error } = await supabase.auth.setSession({
+          access_token: params.access_token,
+          refresh_token: params.refresh_token,
+        });
+
+        if (!error && params.type === 'recovery') {
+          setIsRecoveringPassword(true);
+        }
+      }
+    };
+
+    Linking.getInitialURL().then(handleUrl);
+    const linkingSubscription = Linking.addEventListener('url', (event) => handleUrl(event.url));
+
+    // 2. Initial Session Check
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       if (session) {
@@ -78,20 +118,27 @@ export default function App() {
       }
     });
 
-    // 2. Listen for Auth Changes
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+    // 3. Listen for Auth Changes
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session);
       
-      if (session) {
+      if (event === 'PASSWORD_RECOVERY') {
+        setIsRecoveringPassword(true);
+      }
+      else if (session) {
         setProfileError(false);
         fetchUserRole(session.user.id);
       } else {
         setUserRole(null);
+        setIsRecoveringPassword(false);
         setAppIsReady(true);
       }
     });
 
-    return () => { authListener.subscription.unsubscribe(); };
+    return () => { 
+      authListener.subscription.unsubscribe(); 
+      linkingSubscription.remove();
+    };
   }, []);
 
   // 🔔 Real-time Sales Notification (Manager Only)
@@ -117,8 +164,6 @@ export default function App() {
 
   const fetchUserRole = async (userId, retries = 3) => {
     try {
-      console.log(`Fetching profile for: ${userId}`);
-      
       const { data, error } = await supabase
         .from('profiles')
         .select('*') 
@@ -138,24 +183,20 @@ export default function App() {
         setProfileError(false);
       }
     } catch (e) {
-      console.log("Fetch Failed:", e.message);
       if (retries === 0) setProfileError(true);
     } finally {
       setAppIsReady(true);
     }
   };
 
-  // 🔥 CRITICAL FIX: Optimistic Update
-  // This updates the UI IMMEDIATELY without waiting for the database response.
   const handlePasswordUpdateComplete = async () => {
-    // 1. Force the local state to match "Verified User" status instantly
+    setIsRecoveringPassword(false);
     setUserRole(prev => ({
       ...prev,
       is_new_user: false,
       must_change_password: false
     }));
 
-    // 2. Sync with server in background to be safe
     if (session?.user?.id) {
        await fetchUserRole(session.user.id);
     }
@@ -175,8 +216,18 @@ export default function App() {
     );
   }
 
+  // 🚪 AUTH SCREEN (If no session OR if user clicked Forgot Password email link)
+  if (!session || isRecoveringPassword) {
+    return (
+      <AuthScreen 
+        forcePasswordChange={isRecoveringPassword}
+        onPasswordChanged={handlePasswordUpdateComplete}
+      />
+    );
+  }
+
   // 🚨 ERROR STATE
-  if (profileError && session) {
+  if (profileError) {
     return (
       <View style={styles.errorContainer}>
         <Ionicons name="alert-circle" size={64} color={COLORS.danger} />
@@ -196,9 +247,6 @@ export default function App() {
 
   // --- MAIN CONTENT ---
   const renderContent = () => {
-    if (!session) return <AuthScreen />;
-    
-    // ⏳ LOADING STATE
     if (!userRole) {
       return (
         <View style={styles.splashContainer}>
@@ -209,8 +257,6 @@ export default function App() {
 
     if (userRole.status === 'banned') return <AuthScreen isBanned={true} />; 
 
-    // ✅ FORCE FIX: "IMMUNIZATION GUARD"
-    // Only show password screen if user is NOT a Manager/Owner.
     const shouldShowChangePassword = 
       (userRole.must_change_password || userRole.is_new_user) && 
       userRole.role !== 'manager' && 
@@ -232,12 +278,10 @@ export default function App() {
               height: Platform.OS === 'android' ? 100 : 95, 
               paddingBottom: Platform.OS === 'android' ? 40 : 35, 
               paddingTop: 12,
-              backgroundColor: '#ffffff',
-              borderTopWidth: 0,
-              elevation: 20,
-              shadowColor: '#000', shadowOffset: { width: 0, height: -5 },
-              shadowOpacity: 0.1, shadowRadius: 10,
-              borderTopLeftRadius: 20, borderTopRightRadius: 20,
+              backgroundColor: '#0A0D14', // Match Deep Space Blue
+              borderTopWidth: 1,
+              borderTopColor: '#232A3B',
+              elevation: 0,
             },
             tabBarIcon: ({ focused, color, size }) => {
               let iconName;
@@ -249,8 +293,8 @@ export default function App() {
               return <Ionicons name={iconName} size={size} color={color} />;
             },
             tabBarActiveTintColor: COLORS.primary,
-            tabBarInactiveTintColor: '#9CA3AF',
-            tabBarLabelStyle: { fontSize: 11, fontWeight: '600', marginTop: -5 }
+            tabBarInactiveTintColor: '#64748B',
+            tabBarLabelStyle: { fontSize: 11, fontWeight: '700', marginTop: -5 }
           })}
         >
           {isOwner ? (
@@ -260,9 +304,11 @@ export default function App() {
             </>
           ) : (
             <>
-              <Tab.Screen name="POS">
-                {() => <MerchantScreen user={userRole} />}
-              </Tab.Screen>
+              {!isManager && (
+                <Tab.Screen name="POS">
+                  {() => <MerchantScreen user={userRole} />}
+                </Tab.Screen>
+              )}
 
               {isManager && (
                 <>
@@ -270,6 +316,7 @@ export default function App() {
                   <Tab.Screen name="Sales" component={SalesScreen} />
                 </>
               )}
+              
               <Tab.Screen name="Settings" component={SettingsScreen} />
             </>
           )}
@@ -279,7 +326,7 @@ export default function App() {
   };
 
   return (
-    <View style={{ flex: 1 }}>
+    <View style={{ flex: 1, backgroundColor: COLORS.dark }}>
       {renderContent()}
       <NotificationBanner visible={notifVisible} message={notifMessage} onClose={() => setNotifVisible(false)} />
     </View>
@@ -287,26 +334,20 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  splashContainer: { flex: 1, backgroundColor: '#ffffff', alignItems: 'center', justifyContent: 'center' },
-  notificationWrapper: {
-    position: 'absolute', top: 0, left: 0, right: 0,
-    zIndex: 9999, paddingTop: Platform.OS === 'android' ? 40 : 0,
-  },
-  notificationContent: {
-    margin: 15, backgroundColor: 'white', borderRadius: 16, padding: 15,
-    flexDirection: 'row', alignItems: 'center',
-    shadowColor: "#000", shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15, shadowRadius: 10, elevation: 10,
-    borderLeftWidth: 5, borderLeftColor: COLORS.success
-  },
-  iconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#DEF7EC', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
-  notifTitle: { fontWeight: 'bold', fontSize: 16, color: COLORS.dark, marginBottom: 2 },
-  notifBody: { color: '#555', fontSize: 14 },
-  errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: '#FFF' },
-  errorTitle: { fontSize: 22, fontWeight: 'bold', color: COLORS.dark, marginTop: 20 },
-  errorText: { fontSize: 15, color: '#666', textAlign: 'center', marginVertical: 15, lineHeight: 22 },
+  // Match the new dark theme
+  splashContainer: { flex: 1, backgroundColor: COLORS.dark, alignItems: 'center', justifyContent: 'center' },
+  
+  notificationWrapper: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 9999, paddingTop: Platform.OS === 'android' ? 40 : 0 },
+  notificationContent: { margin: 15, backgroundColor: COLORS.surface, borderRadius: 16, padding: 15, flexDirection: 'row', alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 10, elevation: 10, borderLeftWidth: 5, borderLeftColor: COLORS.success },
+  iconCircle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#062D1F', justifyContent: 'center', alignItems: 'center', marginRight: 15 },
+  notifTitle: { fontWeight: 'bold', fontSize: 16, color: '#FFFFFF', marginBottom: 2 },
+  notifBody: { color: '#94A3B8', fontSize: 14 },
+  
+  errorContainer: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 30, backgroundColor: COLORS.dark },
+  errorTitle: { fontSize: 22, fontWeight: 'bold', color: '#FFFFFF', marginTop: 20 },
+  errorText: { fontSize: 15, color: '#94A3B8', textAlign: 'center', marginVertical: 15, lineHeight: 22 },
   retryBtn: { marginTop: 20, backgroundColor: COLORS.primary, paddingHorizontal: 40, paddingVertical: 14, borderRadius: 12, width: '100%', alignItems: 'center' },
-  retryText: { color: '#FFF', fontWeight: 'bold', fontSize: 16 },
+  retryText: { color: '#130F5F', fontWeight: 'bold', fontSize: 16 },
   logoutBtn: { marginTop: 15, paddingVertical: 12, width: '100%', alignItems: 'center' },
   logoutText: { color: COLORS.danger, fontWeight: 'bold', fontSize: 16 }
 });

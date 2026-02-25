@@ -6,20 +6,20 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Print from 'expo-print'; 
 import { supabase } from '../lib/supabase';
-import { Calendar } from 'react-native-calendars'; // 👈 NEW PRO CALENDAR
+import { Calendar } from 'react-native-calendars';
 
 import SalesChart from '../components/SalesChart';
 
 const COLORS = {
-  primary: '#130f5f',    
-  success: '#10B981',    
-  bg: '#F3F4F6',         
-  white: '#FFFFFF',
-  text: '#1F2937',       
-  subText: '#6B7280',
-  border: '#E5E7EB',
+  primary: '#F5C842',       // Gold
+  success: '#F5C842',       // Gold for success/positive values
+  bg: '#0C0E1A',            // Dark navy background
+  white: '#161929',         // Card background (slightly lighter dark)
+  text: '#F5C842',          // Gold text
+  subText: '#A89B6A',       // Muted gold
+  border: '#2A2D3E',        // Dark border
   cardShadow: {
-    shadowColor: "#130f5f",
+    shadowColor: "#F5C842",
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.08,
     shadowRadius: 12,
@@ -29,10 +29,10 @@ const COLORS = {
 
 export default function SalesScreen() {
   // Dates
-  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]); // Format: YYYY-MM-DD
+  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
   const [endDate, setEndDate] = useState(new Date().toISOString().split('T')[0]);
   const [showCalendar, setShowCalendar] = useState(false);
-  const [selectingType, setSelectingType] = useState('start'); // 'start' or 'end'
+  const [selectingType, setSelectingType] = useState('start');
 
   // Data
   const [sales, setSales] = useState([]);
@@ -63,7 +63,6 @@ export default function SalesScreen() {
 
     if (!refreshing) setLoading(true);
     
-    // Append time to dates for accurate filtering
     const startStr = `${startDate}T00:00:00`;
     const endStr = `${endDate}T23:59:59`;
 
@@ -92,7 +91,6 @@ export default function SalesScreen() {
 
   const onRefresh = () => { setRefreshing(true); fetchSales(); };
 
-  // --- CALENDAR HANDLER ---
   const openCalendar = (type) => {
     setSelectingType(type);
     setShowCalendar(true);
@@ -101,18 +99,16 @@ export default function SalesScreen() {
   const onDayPress = (day) => {
     if (selectingType === 'start') {
       setStartDate(day.dateString);
-      // Auto-set end date if it's before start date
       if (new Date(day.dateString) > new Date(endDate)) {
         setEndDate(day.dateString);
       }
-      setSelectingType('end'); // Auto-jump to end selection for UX
+      setSelectingType('end');
     } else {
       setEndDate(day.dateString);
-      setShowCalendar(false); // Close on end date selection
+      setShowCalendar(false);
     }
   };
 
-  // --- RENDERERS ---
   const renderItem = ({ item }) => {
     const dateObj = new Date(item.sale_date);
     const timeString = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -143,7 +139,7 @@ export default function SalesScreen() {
               <Text style={styles.heroValue}>₱{periodTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</Text>
            </View>
            <View style={styles.trendBadge}>
-              <Ionicons name="calendar-outline" size={14} color={COLORS.success} />
+              <Ionicons name="calendar-outline" size={14} color={COLORS.primary} />
               <Text style={styles.trendText}>{startDate} / {endDate}</Text>
            </View>
         </View>
@@ -152,7 +148,7 @@ export default function SalesScreen() {
         </View>
       </View>
 
-      {/* NEW PRO DATE PICKERS */}
+      {/* DATE PICKERS */}
       <View style={styles.filterRow}>
         <TouchableOpacity onPress={() => openCalendar('start')} style={[styles.filterPill, selectingType === 'start' && showCalendar && styles.activePill]}>
           <Text style={styles.pillLabel}>From</Text>
@@ -187,7 +183,7 @@ export default function SalesScreen() {
           contentContainerStyle={styles.listContainer} 
           ListHeaderComponent={renderHeader}
           showsVerticalScrollIndicator={false}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[COLORS.primary]} />}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[COLORS.primary]} tintColor={COLORS.primary} />}
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <Ionicons name="bar-chart-outline" size={48} color={COLORS.subText} />
@@ -197,7 +193,7 @@ export default function SalesScreen() {
         />
       )}
 
-      {/* 🗓️ PRO CALENDAR MODAL */}
+      {/* 🗓️ CALENDAR MODAL */}
       <Modal visible={showCalendar} animationType="fade" transparent>
         <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowCalendar(false)}>
           <View style={styles.calendarModal}>
@@ -212,18 +208,25 @@ export default function SalesScreen() {
               current={selectingType === 'start' ? startDate : endDate}
               onDayPress={onDayPress}
               markedDates={{
-                [startDate]: {startingDay: true, color: COLORS.primary, textColor: 'white'},
-                [endDate]: {endingDay: true, color: COLORS.primary, textColor: 'white'},
-                // You can add logic here to mark days in between if you want
+                [startDate]: {startingDay: true, color: COLORS.primary, textColor: '#0C0E1A'},
+                [endDate]: {endingDay: true, color: COLORS.primary, textColor: '#0C0E1A'},
               }}
               markingType={'period'}
               theme={{
-                selectedDayBackgroundColor: COLORS.primary,
-                todayTextColor: COLORS.primary,
-                arrowColor: COLORS.primary,
+                calendarBackground: '#161929',
+                dayTextColor: '#F5C842',
+                textDisabledColor: '#3A3D4E',
+                monthTextColor: '#F5C842',
+                selectedDayBackgroundColor: '#F5C842',
+                selectedDayTextColor: '#0C0E1A',
+                todayTextColor: '#F5C842',
+                todayBackgroundColor: '#2A2D3E',
+                arrowColor: '#F5C842',
                 textDayFontWeight: '600',
                 textMonthFontWeight: 'bold',
                 textDayHeaderFontWeight: '600',
+                textDayHeaderColor: '#A89B6A',
+                dotColor: '#F5C842',
               }}
             />
             <TouchableOpacity style={styles.confirmBtn} onPress={() => setShowCalendar(false)}>
@@ -244,37 +247,37 @@ const styles = StyleSheet.create({
   listContainer: { paddingHorizontal: 20, paddingBottom: 100 },
 
   // HERO CARD
-  heroCard: { backgroundColor: COLORS.white, borderRadius: 24, padding: 20, marginBottom: 20, ...COLORS.cardShadow },
+  heroCard: { backgroundColor: COLORS.white, borderRadius: 24, padding: 20, marginBottom: 20, borderWidth: 1, borderColor: '#2A2D3E', ...COLORS.cardShadow },
   heroHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 15 },
   heroLabel: { fontSize: 13, color: COLORS.subText, textTransform: 'uppercase', fontWeight: '600' },
   heroValue: { fontSize: 32, fontWeight: '800', color: COLORS.primary },
-  trendBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#ECFDF5', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20, gap: 4 },
-  trendText: { fontSize: 12, fontWeight: '700', color: COLORS.success },
+  trendBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1E1A0E', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 20, gap: 4, borderWidth: 1, borderColor: '#3A3010' },
+  trendText: { fontSize: 12, fontWeight: '700', color: COLORS.primary },
   chartWrapper: { marginTop: 10, alignItems: 'center' },
 
   // FILTERS
   filterRow: { flexDirection: 'row', gap: 12, marginBottom: 25 },
-  filterPill: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12, gap: 8, borderWidth: 1, borderColor: '#E5E7EB' },
+  filterPill: { flex: 1, flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.white, paddingVertical: 12, paddingHorizontal: 16, borderRadius: 12, gap: 8, borderWidth: 1, borderColor: '#2A2D3E' },
   activePill: { borderColor: COLORS.primary, borderWidth: 2 },
   pillLabel: { fontSize: 12, color: COLORS.subText },
   pillValue: { fontSize: 14, fontWeight: '700', color: COLORS.text, flex: 1 },
 
   // LIST ITEMS
   sectionTitle: { fontSize: 18, fontWeight: '700', color: COLORS.text, marginBottom: 12 },
-  card: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.white, padding: 16, borderRadius: 16, marginBottom: 12, borderWidth: 1, borderColor: '#F3F4F6' },
+  card: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.white, padding: 16, borderRadius: 16, marginBottom: 12, borderWidth: 1, borderColor: '#2A2D3E' },
   cardLeft: { flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 },
-  iconBox: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#EEF2FF', alignItems: 'center', justifyContent: 'center' },
+  iconBox: { width: 44, height: 44, borderRadius: 12, backgroundColor: '#1E1A0E', alignItems: 'center', justifyContent: 'center' },
   itemTitle: { fontSize: 15, fontWeight: '700', color: COLORS.text },
   itemSub: { fontSize: 12, color: COLORS.subText },
-  priceText: { fontSize: 15, fontWeight: '700', color: COLORS.success },
+  priceText: { fontSize: 15, fontWeight: '700', color: COLORS.primary },
   emptyState: { alignItems: 'center', marginTop: 40 },
   emptyText: { color: COLORS.subText, marginTop: 10, fontSize: 14 },
 
   // CALENDAR MODAL
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center', padding: 20 },
-  calendarModal: { backgroundColor: 'white', width: '100%', maxWidth: 360, borderRadius: 24, padding: 20, ...COLORS.cardShadow },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  calendarModal: { backgroundColor: '#161929', width: '100%', maxWidth: 360, borderRadius: 24, padding: 20, borderWidth: 1, borderColor: '#2A2D3E', ...COLORS.cardShadow },
   calendarHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   modalTitle: { fontSize: 18, fontWeight: 'bold', color: COLORS.text },
   confirmBtn: { marginTop: 15, backgroundColor: COLORS.primary, paddingVertical: 12, borderRadius: 12, alignItems: 'center' },
-  confirmBtnText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
+  confirmBtnText: { color: '#0C0E1A', fontWeight: 'bold', fontSize: 16 },
 });
